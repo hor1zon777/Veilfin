@@ -145,13 +145,18 @@ func (t *Tools) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	return r, nil
 }
 
+// jpegFormat 把画面转成 JPEG 标准的全范围 YUV。HEVC / VP9 片源通常标记为有限范围（tv），
+// 新版 ffmpeg 的 MJPEG 编码器会直接拒绝；用 -strict unofficial 绕过则会写出颜色发灰的非标准 JPEG。
+const jpegFormat = "format=yuvj420p"
+
 // Frame 截取 at 秒处的一帧，输出 JPEG（宽度 width，0 表示原尺寸）。
 func (t *Tools) Frame(ctx context.Context, path string, at float64, width int) ([]byte, error) {
 	args := []string{"-v", "error", "-ss", strconv.FormatFloat(math.Max(at, 0), 'f', 3, 64), "-i", path, "-frames:v", "1"}
+	vf := "scale=out_range=pc," + jpegFormat
 	if width > 0 {
-		args = append(args, "-vf", fmt.Sprintf("scale='min(%d,iw)':-2", width))
+		vf = fmt.Sprintf("scale='min(%d,iw)':-2:out_range=pc,", width) + jpegFormat
 	}
-	args = append(args, "-q:v", "3", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
+	args = append(args, "-vf", vf, "-q:v", "3", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
 	out, err := run(ctx, 60*time.Second, nil, t.FFmpeg, args...)
 	if err == nil && len(out) == 0 {
 		err = errors.New("截图为空（时间点可能超出视频长度）")
@@ -188,7 +193,8 @@ func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw
 		return nil, nil, err
 	}
 	pattern := filepath.Join(outDir, "sprite_%03d.jpg")
-	vf := fmt.Sprintf("fps=1/%g,scale=%d:%d,tile=%dx%d", info.Interval, info.Width, info.Height, info.Cols, info.Rows)
+	// eof_action=pass：比间隔一半还短的视频，fps 滤镜默认一帧都不输出，这里让它至少输出最后一帧
+	vf := fmt.Sprintf("fps=1/%g:eof_action=pass,scale=%d:%d:out_range=pc,%s,tile=%dx%d", info.Interval, info.Width, info.Height, jpegFormat, info.Cols, info.Rows)
 	_, err := run(ctx, 30*time.Minute, nil, t.FFmpeg, "-v", "error", "-skip_frame", "nokey", "-i", path,
 		"-an", "-sn", "-vf", vf, "-fps_mode", "vfr", "-q:v", "5", "-y", pattern)
 	if err != nil {

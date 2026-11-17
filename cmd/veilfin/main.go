@@ -35,6 +35,7 @@ import (
 	"veilfin/internal/backup"
 	"veilfin/internal/client"
 	"veilfin/internal/db"
+	"veilfin/internal/media"
 	"veilfin/internal/proto"
 	"veilfin/internal/server"
 )
@@ -109,6 +110,9 @@ func main() {
 		err = runUser(args)
 	case "version", "-v", "--version":
 		fmt.Println(version)
+		if media.HasEmbedded() {
+			fmt.Println("内置 ffmpeg " + media.EmbeddedVersion() + "（LGPL）")
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -139,7 +143,7 @@ func runServer(args []string) error {
 	web := fs.Bool("web", envOr("VF_WEB", "") == "1", "同时提供网页模式（手机等无法运行客户端的设备使用，VF_WEB=1）")
 	apiBase := fs.String("api-base", os.Getenv("VF_API_BASE"), "网页模式下前端访问 API 的地址（前端与 API 分开部署时填写）")
 	webOrigin := fs.String("web-origin", os.Getenv("VF_WEB_ORIGIN"), "允许跨域访问 API 的前端地址（前端与 API 分开部署时填写）")
-	ffdir := fs.String("ffmpeg", os.Getenv("VF_FFMPEG"), "ffmpeg / ffprobe 所在目录，默认在 PATH 中查找")
+	ffdir := fs.String("ffmpeg", os.Getenv("VF_FFMPEG"), "ffmpeg / ffprobe 所在目录，默认使用内置版本（如有），否则在 PATH 中查找")
 	tlsCert := fs.String("tls-cert", os.Getenv("VF_TLS_CERT"), "TLS 证书文件（可选）")
 	tlsKey := fs.String("tls-key", os.Getenv("VF_TLS_KEY"), "TLS 私钥文件（可选）")
 	fs.Parse(args)

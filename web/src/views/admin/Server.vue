@@ -5,6 +5,7 @@ import CopyField from '../../components/CopyField.vue'
 
 const s = ref(null)
 const ffmpeg = ref(true)
+const ffmpegInfo = ref('')
 const busy = ref(false)
 const info = ref(null)
 const serverUrl = ref('')
@@ -25,6 +26,7 @@ onMounted(async () => {
     const r = await rpc('admin.settings.get')
     s.value = r.settings
     ffmpeg.value = r.ffmpeg
+    ffmpegInfo.value = r.ffmpegInfo
   } catch (e) {
     toastError(e)
   }
@@ -74,6 +76,7 @@ async function save() {
         </div>
         <label class="check"><input v-model="s.watchEnabled" type="checkbox" /> 监听目录变化，自动扫描新增 / 删除的文件</label>
         <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（只解码关键帧，3 小时视频约需几十秒）</label>
+        <p v-if="ffmpegInfo" class="hint ff">正在使用：{{ ffmpegInfo }}</p>
       </section>
 
       <section class="card-panel d3">
@@ -115,4 +118,5 @@ h2 { font-size: 16px; margin-bottom: 14px; }
 .short { max-width: 200px; }
 .check { display: flex; margin-bottom: 8px; }
 .warn { color: var(--warn); margin-bottom: 14px; }
+.ff { margin-top: 6px; word-break: break-all; }
 </style>

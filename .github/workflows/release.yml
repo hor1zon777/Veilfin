@@ -1,7 +1,8 @@
 # 发布 Release：推送 v* 标签时自动触发（例如 git tag v1.2.0 && git push origin v1.2.0），
 # 也可以在 Actions 页面手动运行并填写版本号。
 #
-# 流程：测试（Go 测试 + 浏览器端加密互通测试）→ 构建前端 → 交叉编译各平台单文件 → 生成校验和 → 发布 Release。
+# 流程：测试（Go 测试 + 浏览器端加密互通测试）与编译精简 ffmpeg（ffmpeg.yml）并行 → 构建前端
+#       → 交叉编译各平台单文件，以及内置 ffmpeg 的服务端版本 → 生成校验和 → 发布 Release。
 name: Release
 
 on:
@@ -61,9 +62,13 @@ jobs:
         working-directory: web
         run: node tests/crypto-interop.mjs
 
+  ffmpeg:
+    name: 精简 ffmpeg
+    uses: ./.github/workflows/ffmpeg.yml
+
   build:
     name: 构建并发布
-    needs: test
+    needs: [test, ffmpeg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -107,6 +112,12 @@ jobs:
             echo "::warning::仓库里提交的前端产物（internal/webui/dist）不是最新的，发布包使用本次重新构建的版本。"
           fi
 
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ffmpeg-*
+          path: ffbundle
+          merge-multiple: true
+
       - name: 交叉编译
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -121,7 +132,19 @@ jobs:
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=7 \
               go build -trimpath -buildvcs=false -ldflags "-s -w -X 'main.version=$full'" -o "$out" ./cmd/veilfin
           done
+          # 内置 ffmpeg 的服务端版本（只做常见的服务端平台）
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            os=${target%/*}; arch=${target#*/}
+            cp "ffbundle/ffmpeg-$os-$arch.tar.gz" internal/media/ffbin/ffmpeg.tar.gz
+            out="dist/veilfin-server-full-$os-$arch"; [ "$os" = windows ] && out="$out.exe"
+            echo "构建 $out"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
+              go build -tags ffmpeg_embed -trimpath -buildvcs=false -ldflags "-s -w -X 'main.version=$full'" -o "$out" ./cmd/veilfin
+          done
+          rm internal/media/ffbin/ffmpeg.tar.gz
           ./dist/veilfin-linux-amd64 version
+          ./dist/veilfin-server-full-linux-amd64 version
+          ls -l dist
           cd dist && sha256sum veilfin-* > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       - name: 生成发布说明
@@ -142,6 +165,20 @@ jobs:
             echo "| FreeBSD x64 | \`veilfin-freebsd-amd64\` |"
             echo
             echo "服务端和本地客户端是同一个程序（\`veilfin server\` / \`veilfin client\`），服务端需要另外安装 ffmpeg。"
+            echo
+            echo "### 内置 ffmpeg 的服务端（免装 ffmpeg）"
+            echo
+            echo "| 平台 | 文件 |"
+            echo "|---|---|"
+            echo "| Linux x64 | \`veilfin-server-full-linux-amd64\` |"
+            echo "| Linux ARM64 | \`veilfin-server-full-linux-arm64\` |"
+            echo "| Windows x64 | \`veilfin-server-full-windows-amd64.exe\` |"
+            echo
+            ver=$(cat scripts/build-ffmpeg.sh | sed -n 's/^FFMPEG_VERSION=//p')
+            echo "内置精简编译的 FFmpeg $ver（仅包含 Veilfin 用到的解码器和滤镜），首次启动时解压到数据目录的 \`bin/\` 下；"
+            echo "用 \`-ffmpeg\` 参数可以改用其他 ffmpeg。本地客户端用不到 ffmpeg，请下载上面的普通版。"
+            echo "FFmpeg 以 [LGPL 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) 许可发布，源码：https://ffmpeg.org/releases/ffmpeg-$ver.tar.xz ，"
+            echo "编译方式见 [scripts/build-ffmpeg.sh](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/scripts/build-ffmpeg.sh)。"
             echo "下载后可以用 \`SHA256SUMS.txt\` 校验文件完整性：\`sha256sum -c SHA256SUMS.txt --ignore-missing\`。"
             echo
             echo "## 变更"

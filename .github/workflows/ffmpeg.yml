@@ -1,0 +1,85 @@
+# 编译内嵌用的精简 ffmpeg（LGPL），并在各自的目标平台上用真实样片测试。
+# 由 Release 工作流调用；构建脚本或本文件有改动时也会自动运行，也可以在 Actions 页面手动运行。
+name: FFmpeg
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/build-ffmpeg.sh
+      - .github/workflows/ffmpeg.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译 ffmpeg（${{ matrix.target }}）
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm # 原生 ARM 构建机，在 Alpine 容器里静态编译
+          - target: windows-amd64
+            runner: ubuntu-latest # 用 mingw-w64 交叉编译
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 编译
+        run: |
+          out="ffbundle/ffmpeg-$TARGET.tar.gz"
+          case "$TARGET" in
+            linux-*)
+              docker run --rm -v "$PWD":/w -w /w alpine:3.22 sh scripts/build-ffmpeg.sh "$TARGET" "$out"
+              ;;
+            windows-*)
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq gcc-mingw-w64-x86-64 nasm
+              sh scripts/build-ffmpeg.sh "$TARGET" "$out"
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: ffbundle/ffmpeg-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: 测试内置 ffmpeg（${{ matrix.target }}）
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: windows-amd64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: ffbundle
+
+      - name: 用样片测试截图、预览图和字幕
+        shell: bash
+        run: |
+          cp "ffbundle/ffmpeg-${{ matrix.target }}.tar.gz" internal/media/ffbin/ffmpeg.tar.gz
+          go test -tags ffmpeg_embed -count=1 -run 'TestEmbeddedTools' -v ./internal/media

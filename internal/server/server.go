@@ -70,6 +70,7 @@ const DefaultSetupWindow = 30 * time.Minute
 type Server struct {
 	cfg           Config
 	ctx           context.Context // 服务端生命周期，后台的备份 / 恢复任务挂在它上面
+	ffInfo        string          // 正在使用的 ffmpeg（内置版本或路径），显示在管理后台
 	id            ed25519.PrivateKey
 	keys          *mediacrypt.Keys
 	DB            *db.DB
@@ -109,13 +110,10 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	ff, err := media.Find(cfg.FFmpegDir)
-	if err != nil {
-		log.Printf("警告：%v。视频仍可播放，但不会生成截图、字幕和预览图。", err)
-		ff = nil
-	}
+	ff, ffInfo := findFFmpeg(cfg)
 	s := &Server{
 		cfg:       cfg,
+		ffInfo:    ffInfo,
 		ctx:       ctx,
 		id:        id,
 		keys:      keys,
@@ -141,6 +139,30 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		s.setupDeadline = s.now().Add(window)
 	}
 	return s, nil
+}
+
+// findFFmpeg 按顺序查找 ffmpeg：-ffmpeg 指定的目录 → 程序内置的版本 → PATH。
+func findFFmpeg(cfg Config) (*media.Tools, string) {
+	dir := cfg.FFmpegDir
+	embedded := ""
+	if dir == "" && media.HasEmbedded() {
+		d, err := media.ExtractEmbedded(filepath.Join(cfg.DataDir, "bin"))
+		if err != nil {
+			log.Printf("警告：%v，改为在 PATH 中查找 ffmpeg", err)
+		} else {
+			dir, embedded = d, media.EmbeddedVersion()
+		}
+	}
+	ff, err := media.Find(dir)
+	if err != nil {
+		log.Printf("警告：%v。视频仍可播放，但不会生成截图、字幕和预览图。", err)
+		return nil, ""
+	}
+	if embedded != "" && filepath.Dir(ff.FFmpeg) == dir {
+		log.Printf("使用内置 ffmpeg %s", embedded)
+		return ff, "内置 ffmpeg " + embedded + "（LGPL）"
+	}
+	return ff, ff.FFmpeg
 }
 
 // NeedsSetup 表示服务端还没有初始化（没有任何用户）。

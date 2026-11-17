@@ -68,6 +68,7 @@ type Service struct {
 	mu       sync.Mutex
 	settings *Settings
 	watcher  *watcher
+	progress progressSet
 }
 
 func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Service {
@@ -143,11 +144,21 @@ func (s *Service) EnqueueScan(libID int64, refresh bool) {
 		key += ":refresh"
 		label += "（刷新元数据）"
 	}
+	s.progress.queued(libID, refresh)
 	s.Main.Add(key, label, func(ctx context.Context) error { return s.ScanLibrary(ctx, libID, refresh) })
 }
 
 // ScanLibrary 扫描媒体库目录，同步新增 / 变化 / 删除的文件，并把需要处理的条目加入队列。
 func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) error {
+	s.progress.startScan(libID, refresh)
+	if err := s.scanLibrary(ctx, libID, refresh); err != nil {
+		s.progress.failScan(libID, err)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) error {
 	lib, err := s.DB.LibraryByID(ctx, libID)
 	if err != nil {
 		return err
@@ -208,6 +219,7 @@ func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) er
 			}
 			found++
 			seen[path] = true
+			s.progress.update(lib.ID, func(t *scanTrack) { t.p.Found++ })
 			mtime := info.ModTime().Unix()
 			if ex, ok := existing[path]; ok {
 				if ex.Size != info.Size() || ex.Mtime != mtime {
@@ -225,6 +237,8 @@ func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) er
 			it.SortTitle = db.SortKey(it.Title)
 			if _, err := s.DB.InsertItem(ctx, it); err != nil {
 				log.Printf("添加 %s 失败: %v", path, err)
+			} else {
+				s.progress.update(lib.ID, func(t *scanTrack) { t.p.Added++ })
 			}
 			return nil
 		})
@@ -247,6 +261,7 @@ func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) er
 			continue
 		}
 		s.RemoveAssets(files)
+		s.progress.update(lib.ID, func(t *scanTrack) { t.p.Removed++ })
 	}
 	s.DB.TouchLibraryScan(ctx, lib.ID)
 
@@ -265,16 +280,23 @@ func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) er
 	pending := map[int64]bool{}
 	for _, id := range ids {
 		pending[id] = true
-		s.EnqueueItem(id, refresh)
 	}
 	// 需要处理的条目会在处理完（拿到时长）后自己排队生成预览图，这里只补上其余缺预览图的
+	var tricks []int64
 	if s.Settings(ctx).TrickplayEnabled && s.FF != nil {
 		tids, _ := s.DB.ItemsNeedingWork(ctx, lib.ID, db.StateTrickplay)
 		for _, id := range tids {
 			if !pending[id] {
-				s.EnqueueTrickplay(id)
+				tricks = append(tricks, id)
 			}
 		}
+	}
+	s.progress.trackItems(lib.ID, ids, tricks)
+	for _, id := range ids {
+		s.EnqueueItem(id, refresh)
+	}
+	for _, id := range tricks {
+		s.EnqueueTrickplay(id)
 	}
 	return nil
 }
@@ -330,12 +352,16 @@ func hasUnder(existing map[string]db.FileState, root string) bool {
 
 func (s *Service) EnqueueItem(id int64, refresh bool) {
 	s.Main.Add(fmt.Sprintf("item:%d", id), fmt.Sprintf("处理条目 #%d", id), func(ctx context.Context) error {
-		return s.ProcessItem(ctx, id, refresh)
+		err := s.ProcessItem(ctx, id, refresh)
+		s.progress.itemDone(id, err)
+		return err
 	})
 }
 
 func (s *Service) EnqueueTrickplay(id int64) {
+	s.progress.trickQueued(id)
 	s.Heavy.Add(fmt.Sprintf("trick:%d", id), fmt.Sprintf("生成预览图 #%d", id), func(ctx context.Context) error {
+		defer s.progress.trickDone(id)
 		return s.GenerateTrickplay(ctx, id)
 	})
 }

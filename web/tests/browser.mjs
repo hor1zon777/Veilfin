@@ -394,6 +394,27 @@ try {
   await playbackTest(page, webBase, 'web')
   await featureTest(page, webBase, 'web')
 
+  // ---- 卡片中间的播放键：直接播放，不经过详情页；点卡片其他位置进详情页 ----
+  await page.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  let card = await page.$('.grid .card')
+  await card.hover()
+  await sleep(500)
+  await (await card.$('.play')).click()
+  const direct = await page.waitForFunction(() => location.hash.startsWith('#/play/'), { timeout: 5000 }).then(() => true).catch(() => false)
+  ok(direct, '点击卡片上的播放键直接进入播放页')
+  const playing = await page
+    .waitForFunction(() => document.querySelector('video')?.currentTime > 0.5, { timeout: 20000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(playing, '点击播放键后视频直接开始播放')
+  await page.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  card = await page.$('.grid .card')
+  await (await card.$('.title')).click()
+  const toDetail = await page.waitForFunction(() => location.hash.startsWith('#/item/'), { timeout: 5000 }).then(() => true).catch(() => false)
+  ok(toDetail, '点击卡片的其他位置仍然进入详情页')
+
   for (const [path, name] of [['/#/admin', 'admin-dashboard'], ['/#/admin/libraries', 'admin-libraries'], ['/#/admin/users', 'admin-users'], ['/#/admin/server', 'admin-server'], ['/#/admin/backup', 'admin-backup'], ['/#/settings', 'settings'], ['/#/history', 'history'], ['/#/library/1?view=folders', 'library-folders']]) {
     await page.goto(webBase + path, { waitUntil: 'networkidle2' })
     await sleep(1200)
@@ -438,6 +459,28 @@ try {
   await sleep(800)
   const libNames = await page.$$eval('.lib h2', (h) => h.map((x) => x.textContent.trim()))
   ok(libNames.some((n) => n.includes('私人收藏')), '管理后台：通过界面创建了受限媒体库')
+
+  // ---- 媒体库扫描进度：刷新元数据会重新处理全部条目 ----
+  const firstLib = (await page.$$('.lib'))[0]
+  await (await firstLib.$$('.ops .btn'))[1].click()
+  const scanShown = await firstLib.waitForSelector('.scan', { timeout: 5000 }).then(() => true).catch(() => false)
+  const scanBtn = await firstLib.$eval('.ops .btn', (b) => ({ text: b.textContent, disabled: b.disabled, spin: !!b.querySelector('.spin-icon.on') }))
+  ok(scanShown && scanBtn.text.includes('扫描中') && scanBtn.disabled && scanBtn.spin, '管理后台：点击后立即显示扫描进度，按钮变为“扫描中”并转动')
+  await sleep(400)
+  await shot(page, 'web-admin-scan-progress')
+  const doneShown = await page
+    .waitForFunction((el) => el.querySelector('.scan.done .title')?.textContent.includes('扫描完成'), { timeout: 90000 }, firstLib)
+    .then(() => true)
+    .catch(() => false)
+  const doneText = doneShown ? await firstLib.$eval('.scan.done', (e) => e.textContent) : ''
+  ok(doneShown && doneText.includes('扫描完成') && /共 \d+ 个视频/.test(doneText), `管理后台：扫描结束后显示完成状态（${doneText.trim()}）`)
+  await sleep(300)
+  await shot(page, 'web-admin-scan-done')
+  const collapsed = await page
+    .waitForFunction((el) => !el.querySelector('.expand.open') && !el.querySelector('.ops .btn').disabled, { timeout: 15000 }, firstLib)
+    .then(() => true)
+    .catch(() => false)
+  ok(collapsed, '管理后台：完成状态停留几秒后自动收起，按钮恢复')
 
   // ---- 设置 PIN ----
   await page.goto(webBase + '/#/settings', { waitUntil: 'networkidle2' })

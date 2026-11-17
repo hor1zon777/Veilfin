@@ -29,6 +29,9 @@ func init() {
 	register("admin.libs.delete", admin, rpcLibsDelete)
 	register("admin.libs.scan", admin, rpcLibsScan)
 	register("admin.fs.list", admin, rpcFSList)
+	register("admin.libs.progress", admin, func(s *Server, c *call) (any, error) {
+		return s.Lib.ScanProgress(), nil
+	})
 	register("admin.tasks", admin, func(s *Server, c *call) (any, error) {
 		return []tasks.Status{s.Lib.Main.Status(), s.Lib.Heavy.Status()}, nil
 	})

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { state } from '../store.js'
 import { placeholderStyle, resolutionLabel, fmtDuration } from '../util.js'
 import Icon from './Icon.vue'
@@ -12,6 +13,12 @@ const props = defineProps({
   index: { type: Number, default: 0 }, // 用于依次出现的延迟
   to: { type: [String, Object], default: '' }, // 点击后去哪里，默认是详情页
 })
+
+const router = useRouter()
+// 点中间的播放键直接播放（从上次看到的位置继续），点卡片其他位置进详情页
+function playNow() {
+  router.push(`/play/${props.item.id}`)
+}
 
 const loaded = ref(false)
 const img = computed(() => {
@@ -45,7 +52,9 @@ const delay = computed(() => ({ '--i': Math.min(props.index % 60, 14) }))
       <span v-if="item.played" class="played" title="已看过"><Icon name="check" :size="16" /></span>
       <span v-if="shape === 'thumb' && resolutionLabel(item.width, item.height)" class="res">{{ resolutionLabel(item.width, item.height) }}</span>
       <div v-if="showProgress && pct" class="progress"><div :style="{ transform: `scaleX(${pct / 100})` }" /></div>
-      <div class="hover"><span class="play"><Icon name="play" :size="30" /></span></div>
+      <div class="hover">
+        <button type="button" class="play" title="播放" aria-label="播放" @click.prevent.stop="playNow"><Icon name="play" :size="30" /></button>
+      </div>
     </div>
     <div class="title" :title="item.title">{{ item.title }}</div>
     <div v-if="sub" class="sub">{{ sub }}</div>
@@ -74,8 +83,15 @@ const delay = computed(() => ({ '--i': Math.min(props.index % 60, 14) }))
 .hover { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.28); opacity: 0; transition: opacity .25s var(--ease-out); }
 .card:hover .hover { opacity: 1; }
 .play { width: 52px; height: 52px; border-radius: 50%; background: rgba(82,181,75,.9); display: flex; align-items: center; justify-content: center; color: #fff;
-  transform: scale(.6); transition: transform .45s var(--spring-bouncy); box-shadow: 0 6px 20px rgba(0,0,0,.4); backdrop-filter: blur(6px); }
+  border: 0; padding: 0; cursor: pointer; pointer-events: none;
+  transform: scale(.6); transition: transform .45s var(--spring-bouncy), background-color .2s, box-shadow .3s; box-shadow: 0 6px 20px rgba(0,0,0,.4); backdrop-filter: blur(6px); }
 .card:hover .play { transform: scale(1); }
+/* 只有能悬停的设备（鼠标）才能点播放键；触屏上播放键看不见，点卡片任何位置都进详情页 */
+@media (hover: hover) {
+  .card:hover .play { pointer-events: auto; }
+  .card:hover .play:hover { transform: scale(1.12); background: var(--accent); box-shadow: 0 0 0 6px rgba(82,181,75,.25), 0 8px 24px rgba(0,0,0,.5); }
+  .card:hover .play:active { transform: scale(.92); transition-duration: .08s; }
+}
 .title { margin-top: 8px; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color .2s; }
 .card:hover .title { color: #fff; }
 .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

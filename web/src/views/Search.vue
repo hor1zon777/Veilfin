@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onActivated } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { rpc, toastError } from '../store.js'
 import { debounce } from '../util.js'
@@ -36,6 +36,20 @@ watch(q, debounce(search, 300))
 onMounted(() => {
   input.value?.focus()
   if (q.value) search()
+})
+// 页面被缓存，回来时静默刷新结果里的观看进度
+let first = true
+onActivated(async () => {
+  if (first) return (first = false)
+  const text = q.value.trim()
+  if (!text || loading.value) return
+  try {
+    const r = await rpc('items.list', { libraryId: 0, q: text, sort: 'title', limit: 120 })
+    if (q.value.trim() === text) {
+      items.value = r.items
+      total.value = r.total
+    }
+  } catch {}
 })
 </script>
 

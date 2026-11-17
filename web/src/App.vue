@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { state } from './store.js'
 import { transitionName, onPageLeft } from './router.js'
@@ -11,6 +11,17 @@ const showBar = computed(() => state.me && !route.meta.fullscreen && !route.meta
 const reload = () => location.reload()
 // 管理后台的子页面在布局内部过渡，外层只在进出整个后台时过渡
 const pageKey = (r) => r.meta.section || r.path
+// 列表类页面保留在内存里：从详情页返回时列表、已加载的分页和滚动位置都还在（回来后各页面自己静默刷新进度）
+const CACHED = ['Home', 'Library', 'Search', 'History']
+const cached = ref(CACHED)
+// 换了账号或受限内容重新上锁时清空缓存，避免按“后退”还能看到之前加载的内容
+watch(
+  () => [state.me?.id, state.me?.unlocked],
+  () => {
+    cached.value = []
+    nextTick(() => (cached.value = CACHED))
+  },
+)
 </script>
 
 <template>
@@ -26,7 +37,9 @@ const pageKey = (r) => r.meta.section || r.path
     <router-view v-slot="{ Component, route: r }">
       <!-- 登录页背景有无限循环的 animation，必须指定只等 transition 结束，否则 Vue 会按动画时长（18 秒）等待离场 -->
       <Transition :name="transitionName" type="transition" mode="out-in" @after-leave="onPageLeft">
-        <component :is="Component" :key="pageKey(r)" />
+        <KeepAlive :include="cached" :max="6">
+          <component :is="Component" :key="pageKey(r)" />
+        </KeepAlive>
       </Transition>
     </router-view>
     <PinDialog v-if="state.pin" />

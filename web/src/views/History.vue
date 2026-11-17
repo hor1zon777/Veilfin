@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { rpc, toast, toastError } from '../store.js'
 import { fmtDate, fmtDateTime, fmtDuration } from '../util.js'
 import MediaCard from '../components/MediaCard.vue'
@@ -23,6 +23,17 @@ async function load(more) {
   }
 }
 onMounted(() => load(false))
+// 页面被缓存，回来时静默刷新已加载的部分（新看的视频会出现在最前面），不显示加载动画、不丢滚动位置
+let first = true
+onActivated(async () => {
+  if (first) return (first = false)
+  if (loading.value) return
+  try {
+    const r = await rpc('history.list', { offset: 0, limit: Math.min(Math.max(items.value.length, 60), 200) })
+    items.value = r.items
+    total.value = r.total
+  } catch {}
+})
 
 // 按日期分组
 const groups = computed(() => {

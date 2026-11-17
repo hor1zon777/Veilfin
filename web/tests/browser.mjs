@@ -415,6 +415,51 @@ try {
   const toDetail = await page.waitForFunction(() => location.hash.startsWith('#/item/'), { timeout: 5000 }).then(() => true).catch(() => false)
   ok(toDetail, '点击卡片的其他位置仍然进入详情页')
 
+  // ---- 从详情页返回列表、从播放页返回详情页时，回到原来的滚动位置 ----
+  {
+    const sp = await newPage(ctx1, 'scroll')
+    await sp.setViewport({ width: 900, height: 360 })
+    await sp.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
+    await sp.waitForSelector('.grid .card')
+    await sleep(1000)
+    const scrollable = await sp.evaluate(() => document.documentElement.scrollHeight - innerHeight)
+    if (ok(scrollable > 80, `滚动测试：媒体库页面可以滚动（${scrollable}px）`)) {
+      await sp.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+      await sleep(400)
+      const y = await sp.evaluate(() => scrollY)
+      await sp.evaluate(() => [...document.querySelectorAll('.grid .card')].at(-1).querySelector('.title').click())
+      await sp.waitForSelector('.detail .title')
+      await sleep(800)
+      await sp.evaluate(() => history.back())
+      const back = await sp
+        .waitForFunction((y) => location.hash.startsWith('#/library/') && document.querySelector('.grid .card') && Math.abs(scrollY - y) < 4, { timeout: 5000 }, y)
+        .then(() => true)
+        .catch(() => false)
+      ok(back, `从详情页返回媒体库后回到原来的滚动位置（${y}px → ${await sp.evaluate(() => scrollY)}px）`)
+    }
+    // 详情页 → 播放页 → 返回：详情页数据重新加载，等页面撑开后再还原位置
+    await sp.evaluate(() => document.querySelector('.grid .card .title').click())
+    await sp.waitForSelector('.detail .title')
+    await sleep(800)
+    const iy = await sp.evaluate(() => {
+      window.scrollTo(0, document.documentElement.scrollHeight)
+      return scrollY
+    })
+    if (ok(iy > 40, `滚动测试：详情页可以滚动（${iy}px）`)) {
+      await sp.evaluate(() => document.querySelector('.actions .btn.primary').click())
+      await sp.waitForFunction(() => location.hash.startsWith('#/play/'), { timeout: 5000 })
+      await sleep(1500)
+      await sp.evaluate(() => history.back())
+      const back = await sp
+        .waitForFunction((y) => location.hash.startsWith('#/item/') && Math.abs(scrollY - y) < 4, { timeout: 5000 }, iy)
+        .then(() => true)
+        .catch(() => false)
+      ok(back, `从播放页返回详情页后回到原来的滚动位置（${iy}px → ${await sp.evaluate(() => scrollY)}px）`)
+    }
+    ok(sp.errors.length === 0, '滚动测试：没有控制台错误' + (sp.errors.length ? '\n      ' + sp.errors.join('\n      ') : ''))
+    await sp.close()
+  }
+
   for (const [path, name] of [['/#/admin', 'admin-dashboard'], ['/#/admin/libraries', 'admin-libraries'], ['/#/admin/users', 'admin-users'], ['/#/admin/server', 'admin-server'], ['/#/admin/backup', 'admin-backup'], ['/#/settings', 'settings'], ['/#/history', 'history'], ['/#/library/1?view=folders', 'library-folders']]) {
     await page.goto(webBase + path, { waitUntil: 'networkidle2' })
     await sleep(1200)
@@ -598,7 +643,11 @@ try {
     await p.goto(webBase + '/#/play/1?t=0', { waitUntil: 'networkidle2' })
     await p.waitForFunction(() => document.querySelector('video')?.currentTime > 0.3, { timeout: 20000 })
     const sel = 'button[title="全屏 (F)"]'
-    if (tap) await p.tap('.player') // 先轻点一下唤出控制栏
+    if (tap) {
+      // 控制栏显示时轻点画面会把它隐藏，所以等它自动隐藏后再轻点唤出
+      await p.waitForSelector('.player.hide-ui', { timeout: 8000 })
+      await p.tap('.player')
+    }
     else await p.mouse.move(700, 450)
     await sleep(500)
     await (tap ? p.tap(sel) : p.click(sel))
@@ -625,6 +674,37 @@ try {
   await sleep(500)
   fs = await fsState(mp)
   ok(!fs.tag && !fs.controls, '移动端：退出系统全屏后恢复自定义控件')
+
+  // ---- 移动端播放页：时间在进度条上方左对齐，按钮居中；轻点画面只切换控制栏、不暂停 ----
+  const layout = await mp.evaluate(() => {
+    const r = (s) => document.querySelector(s)?.getBoundingClientRect()
+    const t = r('.m-time')
+    const bar = r('.bar')
+    const btns = [...document.querySelectorAll('.controls > *')].map((e) => e.getBoundingClientRect()).filter((b) => b.width)
+    const c = r('.controls')
+    const left = Math.min(...btns.map((b) => b.left))
+    const right = Math.max(...btns.map((b) => b.right))
+    return {
+      time: !!t && t.bottom <= bar.top + 1 && Math.abs(t.left - bar.left) < 6,
+      oldTime: !!document.querySelector('.controls .time'),
+      centered: Math.abs((left + right) / 2 - (c.left + c.right) / 2) < 3,
+      fits: right <= innerWidth && left >= 0,
+    }
+  })
+  ok(layout.time && !layout.oldTime, `移动端：时间显示在进度条上方并左对齐（${JSON.stringify(layout)}）`)
+  ok(layout.centered && layout.fits, `移动端：控制按钮在底部居中且不超出屏幕（${JSON.stringify(layout)}）`)
+  await shot(mp, 'web-mobile-player')
+  await mp.evaluate(() => document.querySelector('video').play())
+  if (await mp.$('.player.hide-ui')) await mp.tap('.player')
+  await sleep(300)
+  await mp.tap('.player')
+  await sleep(400)
+  const afterTap = await mp.evaluate(() => ({ paused: document.querySelector('video').paused, hidden: !!document.querySelector('.player.hide-ui') }))
+  ok(!afterTap.paused && afterTap.hidden, `移动端：播放中轻点画面不暂停，只隐藏控制栏（${JSON.stringify(afterTap)}）`)
+  await mp.tap('.player')
+  await sleep(400)
+  const afterTap2 = await mp.evaluate(() => ({ paused: document.querySelector('video').paused, hidden: !!document.querySelector('.player.hide-ui') }))
+  ok(!afterTap2.paused && !afterTap2.hidden, `移动端：再次轻点唤出控制栏，仍在播放（${JSON.stringify(afterTap2)}）`)
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
 

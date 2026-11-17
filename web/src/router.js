@@ -40,6 +40,22 @@ export function onPageLeft() {
   scrollResolver = null
 }
 
+// 返回上一页时，页面内容可能还在加载（例如详情页重新请求数据），高度不够就滚不到原来的位置。
+// 每帧检查一次，等页面撑开（或最多等 1.5 秒）再滚动。
+function whenScrollable(pos) {
+  const top = pos.top || 0
+  if (!top) return Promise.resolve(pos)
+  return new Promise((resolve) => {
+    const start = performance.now()
+    const check = () => {
+      const max = document.documentElement.scrollHeight - window.innerHeight
+      if (max >= top - 1 || performance.now() - start > 1500) return resolve(pos)
+      requestAnimationFrame(check)
+    }
+    check()
+  })
+}
+
 const router = createRouter({
   history: createWebHashHistory(),
   routes,
@@ -47,7 +63,7 @@ const router = createRouter({
     if (to.path === from.path) return false // 只改了查询参数（筛选条件）：保持位置
     const target = saved || { top: 0 }
     return new Promise((resolve) => {
-      scrollResolver = () => resolve(target)
+      scrollResolver = () => resolve(whenScrollable(target))
       setTimeout(() => {
         if (scrollResolver) onPageLeft()
       }, 260)

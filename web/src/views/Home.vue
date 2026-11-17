@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onActivated } from 'vue'
 import { useRouter } from 'vue-router'
 import { state, rpc, toastError, requestPin } from '../store.js'
 import { kindNames, placeholderStyle, fmtAgo, fmtRemain } from '../util.js'
@@ -22,6 +22,9 @@ async function load() {
   }
 }
 onMounted(load)
+// 页面被缓存，看完视频回来时静默刷新“继续观看”等数据（不显示骨架屏）
+let first = true
+onActivated(() => (first ? (first = false) : load()))
 
 const shapeOf = (kind) => (kind === 'home' ? 'thumb' : 'poster')
 

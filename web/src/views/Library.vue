@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { rpc, toast, toastError } from '../store.js'
 import { debounce, kindNames, randomSeed } from '../util.js'
@@ -121,9 +121,11 @@ function params() {
   return p
 }
 
+let gen = 0 // 每次重新加载列表加一，静默刷新据此丢弃过期结果
 async function load(reset) {
   if (loading.value) return
   if (reset) {
+    gen++
     items.value = []
     folders.value = []
     done.value = false
@@ -204,6 +206,30 @@ onMounted(async () => {
   if (!migrated) load(true) // 改写了 URL 的话由下面的 watch 触发加载
 })
 onBeforeUnmount(() => io?.disconnect())
+
+// 页面被缓存：从详情页 / 播放页回来时，已加载的条目原地刷新（观看进度、已看标记、被删除的条目），
+// 不清空列表，滚动位置保持不变。服务端单次最多返回 500 条，分批取。
+let first = true
+onActivated(async () => {
+  if (first) return (first = false)
+  const n = items.value.length
+  if (!n || loading.value || route.path !== `/library/${props.id}`) return
+  const g = gen
+  try {
+    const out = []
+    let r = null
+    while (out.length < n) {
+      r = await rpc('items.list', { ...params(), offset: out.length, limit: Math.min(500, n - out.length) })
+      if (g !== gen) return
+      out.push(...r.items)
+      if (!r.items.length) break
+    }
+    if (loading.value) return
+    items.value = out
+    total.value = r.total
+    done.value = out.length >= r.total
+  } catch {}
+})
 // 离开页面（过渡动画期间路由已经变了）时不要按新页面的参数重新加载
 watch(() => route.query, () => route.path === `/library/${props.id}` && load(true), { deep: true })
 </script>

@@ -269,9 +269,21 @@ function onWebkitEnd() {
   fullscreen.value = false
   poke()
 }
-// 系统全屏时，点击 / 双击交给系统控件处理
+// 系统全屏时，点击 / 双击交给系统控件处理。
+// 移动端点击画面只切换控制栏的显示 / 隐藏，不暂停（暂停用中间的播放键）
+let uiBeforeTouch = true // 这次触摸之前控制栏是否已经显示（touchstart 会先把它唤出来）
+function onTouch() {
+  uiBeforeTouch = showUI.value
+  poke()
+}
 function onVideoClick() {
-  if (!nativeFs.value) toggle()
+  if (nativeFs.value) return
+  if (!mobile) return toggle()
+  if (uiBeforeTouch) {
+    clearTimeout(hideTimer)
+    menu.value = ''
+    showUI.value = false
+  } else poke()
 }
 function onVideoDblclick() {
   if (!nativeFs.value) toggleFullscreen()
@@ -437,7 +449,7 @@ watch(menu, (m) => m && (showUI.value = true))
 </script>
 
 <template>
-  <div ref="root" class="player" :class="{ 'hide-ui': !showUI }" @mousemove="poke" @touchstart.passive="poke">
+  <div ref="root" class="player" :class="{ 'hide-ui': !showUI, mobile }" @mousemove="poke" @touchstart.passive="onTouch">
     <video
       v-if="data"
       ref="video"
@@ -511,6 +523,8 @@ watch(menu, (m) => m && (showUI.value = true))
     </div>
 
     <div class="bottom ui" @click.stop>
+      <!-- 移动端：时间放在进度条上方、左对齐，按钮整行居中 -->
+      <div v-if="mobile" class="m-time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
       <div ref="bar" class="bar" @pointerdown="onBarDown" @pointermove="onBarMove" @pointerleave="hover = null">
         <div class="track">
           <div v-for="(b, i) in buffered" :key="i" class="buf" :style="{ left: (b[0] / dur) * 100 + '%', width: ((b[1] - b[0]) / dur) * 100 + '%' }" />
@@ -532,11 +546,14 @@ watch(menu, (m) => m && (showUI.value = true))
         </button>
         <button class="icon-btn" title="前进 10 秒 (→)" @click="skip(10)"><Icon name="forward" /></button>
         <button v-if="data?.next" class="icon-btn" :title="'下一个：' + data.next.title" @click="playNext"><Icon name="next" /></button>
-        <div class="time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
-        <div class="spacer" />
-        <div class="vol">
+        <template v-if="!mobile">
+          <div class="time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
+          <div class="spacer" />
+        </template>
+        <!-- 移动端用系统音量键调音量，只在被静音（例如自动播放被限制）时显示取消静音的按钮 -->
+        <div v-if="!mobile || muted" class="vol">
           <button class="icon-btn" title="静音 (M)" @click="toggleMute()"><Icon :name="muted || volume === 0 ? 'mute' : 'volume'" /></button>
-          <input type="range" min="0" max="1" step="0.05" :value="muted ? 0 : volume" @input="setVolume(Number($event.target.value))" />
+          <input v-if="!mobile" type="range" min="0" max="1" step="0.05" :value="muted ? 0 : volume" @input="setVolume(Number($event.target.value))" />
         </div>
         <div v-if="data?.subtitles.length" class="pop">
           <button class="icon-btn" :class="{ on: subIndex >= 0 }" title="字幕 (C)" @click="menu = menu === 'subs' ? '' : 'subs'"><Icon name="subtitles" /></button>
@@ -636,4 +653,11 @@ video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .qinfo { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; color: #ddd; max-width: 40vw;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: rgba(255,255,255,.1); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
 @media (max-width: 600px) { .vol input { display: none; } .bottom { padding: 30px 10px 8px; } }
+/* 移动端布局：时间在进度条上方左对齐，控制按钮在底部居中 */
+.m-time { padding: 0 2px; font-variant-numeric: tabular-nums; font-size: 13px; color: rgba(255,255,255,.9); }
+.mobile .bottom { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.mobile .controls { justify-content: center; flex-wrap: wrap; gap: 2px; margin-top: 0; }
+.mobile .controls .icon-btn:not(.big) { width: 38px; height: 38px; }
+.mobile .resume-chip { left: 12px; bottom: 150px; }
+.mobile .next-card { left: 12px; right: 12px; bottom: 150px; max-width: none; }
 </style>

@@ -2,7 +2,7 @@
 
 类似 Emby 的个人视频服务。**所有请求、响应、视频、图片和字幕都在应用层做了端到端加密**，即使服务端部署在 CDN 之后，CDN 也只能看到密文，没法审查内容。
 
-- 单个可执行文件（约 13 MB），只依赖 ffmpeg；数据库是内置的 SQLite
+- 单个可执行文件（约 13 MB），只依赖 ffmpeg；也有内置精简 ffmpeg 的服务端版本，完全免安装；数据库是内置的 SQLite
 - 多用户、媒体库权限、受限媒体库加 PIN 锁
 - 观看进度与上次观看时间、自动续播（可一键从头播放）、继续观看、观看记录、播放统计
 - 随机播放：按当前媒体库 / 文件夹 / 筛选条件打乱生成播放队列，播完自动接下一个
@@ -54,11 +54,13 @@ docker compose up -d
 docker compose logs veilfin     # 记下“服务端公钥”和“公钥指纹”
 ```
 
-或者直接运行（需要先安装 ffmpeg）：
+或者直接运行。Release 里的 `veilfin-server-full-*`（Linux x64 / ARM64、Windows x64）内置了精简编译的 ffmpeg，下载即可运行；普通版需要先安装 ffmpeg：
 
 ```bash
-./veilfin server -media /path/to/videos -web
+./veilfin-server-full-linux-amd64 server -media /path/to/videos -web
 ```
+
+内置的 ffmpeg 首次启动时会解压到数据目录的 `bin/` 下（数据目录所在分区不能禁止执行程序）。查找顺序是：`-ffmpeg` 参数 → 内置版本 → PATH。
 
 启动日志会打印两样东西：
 
@@ -135,9 +137,15 @@ sh build.sh          # 先构建前端，再交叉编译 Windows / Linux / macOS
 
 Node 只在构建前端时需要，运行时不需要。仓库里已经带有构建好的前端（`internal/webui/dist`），所以只改 Go 代码时直接 `go build ./cmd/veilfin` 就行。
 
+### 内置 ffmpeg 的版本
+
+`scripts/build-ffmpeg.sh` 从源码静态编译一个精简的 ffmpeg / ffprobe：只包含用到的解析器、解码器（H.264 / HEVC / VP8 / VP9 / MPEG-4）、MJPEG 编码器、字幕组件和三个滤镜，许可证是 LGPL 2.1，不含 GPL 组件。生成的包放到 `internal/media/ffbin/ffmpeg.tar.gz`，再加上 `-tags ffmpeg_embed` 构建即可，详见 `internal/media/ffbin/README.md`。
+
+`internal/media` 的测试会用 `testdata/` 里的样片，把截图、进度条预览图、内嵌和外挂字幕都跑一遍：普通构建测试系统 ffmpeg，`-tags ffmpeg_embed` 构建测试内置版本。
+
 ### 发布
 
-推送 `v` 开头的标签会触发 GitHub Actions（`.github/workflows/release.yml`）：先跑 Go 测试和浏览器端加密互通测试，再构建前端、交叉编译 Windows / Linux / macOS / FreeBSD 共 8 个平台，生成 `SHA256SUMS.txt`，最后发布到 Release。
+推送 `v` 开头的标签会触发 GitHub Actions（`.github/workflows/release.yml`）：先跑 Go 测试和浏览器端加密互通测试，同时在三个平台上编译精简 ffmpeg，并在各自的平台上用样片测试（`.github/workflows/ffmpeg.yml`）；然后构建前端，交叉编译 Windows / Linux / macOS / FreeBSD 共 8 个平台的普通版，以及 3 个内置 ffmpeg 的服务端版本，生成 `SHA256SUMS.txt`，最后发布到 Release。
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0

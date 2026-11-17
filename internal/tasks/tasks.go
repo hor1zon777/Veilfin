@@ -14,11 +14,14 @@ type task struct {
 	fn    func(ctx context.Context) error
 }
 
-// Queue 是一个有固定 worker 数的任务队列。
+// Queue 是一个有并发上限的任务队列，worker 数可以在运行中调整（SetWorkers）。
 type Queue struct {
 	name string
+	ctx  context.Context
 
 	mu      sync.Mutex
+	workers int // 当前的工作协程数
+	target  int // 期望的工作协程数：多出来的协程做完手头的任务后退出
 	cond    *sync.Cond
 	pending []*task
 	queued  map[string]bool
@@ -47,12 +50,9 @@ type Status struct {
 
 // New 创建队列并启动 workers 个工作协程。
 func New(ctx context.Context, name string, workers int) *Queue {
-	q := &Queue{name: name, queued: map[string]bool{}, running: map[string]string{}}
+	q := &Queue{name: name, ctx: ctx, queued: map[string]bool{}, running: map[string]string{}}
 	q.cond = sync.NewCond(&q.mu)
-	for i := 0; i < workers; i++ {
-		q.wg.Add(1)
-		go q.worker(ctx)
-	}
+	q.SetWorkers(workers)
 	go func() {
 		<-ctx.Done()
 		q.mu.Lock()
@@ -61,6 +61,33 @@ func New(ctx context.Context, name string, workers int) *Queue {
 		q.mu.Unlock()
 	}()
 	return q
+}
+
+// SetWorkers 调整工作协程数（至少 1 个）。增加时立即启动新的协程；
+// 减少时多出来的协程会在做完当前任务后退出，不会中断正在进行的任务。
+func (q *Queue) SetWorkers(n int) {
+	if n < 1 {
+		n = 1
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return
+	}
+	q.target = n
+	for q.workers < n {
+		q.workers++
+		q.wg.Add(1)
+		go q.worker(q.ctx)
+	}
+	q.cond.Broadcast() // 让空闲的多余协程醒来退出
+}
+
+// Workers 返回期望的工作协程数。
+func (q *Queue) Workers() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.target
 }
 
 // Stopped 等待所有工作协程退出（创建队列时传入的 ctx 结束后才会退出）。
@@ -82,10 +109,11 @@ func (q *Queue) worker(ctx context.Context) {
 	defer q.wg.Done()
 	for {
 		q.mu.Lock()
-		for len(q.pending) == 0 && !q.closed {
+		for len(q.pending) == 0 && !q.closed && q.workers <= q.target {
 			q.cond.Wait()
 		}
-		if q.closed {
+		if q.closed || q.workers > q.target {
+			q.workers--
 			q.mu.Unlock()
 			return
 		}

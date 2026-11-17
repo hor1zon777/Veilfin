@@ -2,12 +2,14 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { rpc, toast, toastError } from '../../store.js'
 import { fmtSize, fmtDateTime, fmtDate } from '../../util.js'
+import Icon from '../../components/Icon.vue'
 
 const stats = ref(null)
 const tasks = ref([])
 const days = ref(30)
 const hover = ref(-1)
 const showTable = ref(false)
+const newVersion = ref(null) // 自动检查发现的新版本
 let timer = null
 
 async function loadStats() {
@@ -25,6 +27,9 @@ async function loadTasks() {
 onMounted(() => {
   loadStats()
   loadTasks()
+  rpc('admin.update.status')
+    .then((u) => (newVersion.value = u.latest?.newer ? u.latest.tag : null))
+    .catch(() => {})
   timer = setInterval(loadTasks, 3000)
 })
 onBeforeUnmount(() => clearInterval(timer))
@@ -85,6 +90,12 @@ const peak = computed(() => values.value.reduce((best, v, i) => (v > values.valu
 
 <template>
   <div class="admin-body">
+    <Transition name="slide-up">
+      <router-link v-if="newVersion" to="/admin/update" class="card-panel new-ver">
+        <Icon name="download" :size="18" />
+        <span>发现新版本 <b>{{ newVersion }}</b>，点击前往「系统更新」查看</span>
+      </router-link>
+    </Transition>
 
     <div v-if="stats" class="tiles">
       <div class="tile rise d0">
@@ -199,6 +210,9 @@ const peak = computed(() => values.value.reduce((best, v, i) => (v > values.valu
 </template>
 
 <style scoped>
+.new-ver { display: flex; align-items: center; gap: 10px; padding: 12px 18px; margin-bottom: 16px; color: var(--text); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); transition: background 0.25s; }
+.new-ver:hover { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.new-ver b { font-family: Consolas, ui-monospace, monospace; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 16px; }
 .tile { background: var(--panel); border-radius: 12px; padding: 16px 18px; }
 .t-label { color: var(--muted); font-size: 13px; }

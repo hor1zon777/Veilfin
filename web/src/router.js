@@ -25,6 +25,7 @@ const routes = [
       { path: 'genres', component: () => import('./views/admin/Genres.vue') },
       { path: 'server', component: () => import('./views/admin/Server.vue') },
       { path: 'backup', component: () => import('./views/admin/Backup.vue') },
+      { path: 'update', component: () => import('./views/admin/Update.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },

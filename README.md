@@ -116,6 +116,22 @@ veilfin server -api-base https://cdn.example.com -web-origin https://app.example
 { "title": "2023 年家庭聚会", "overview": "…", "date": "2023-10-01", "tags": ["家庭"], "actors": ["爷爷", "奶奶"] }
 ```
 
+### 5. 在线更新
+
+「管理后台 → 系统更新」可以检查 GitHub Release 上的新版本，一键下载并更新服务端：
+
+1. 服务端下载与本机平台对应的程序（内置 ffmpeg 的版本会继续选内置 ffmpeg 的版本），用发布附带的 `SHA256SUMS.txt` 校验；
+2. 试运行 `新程序 version`，确认能在本机运行且版本号一致；
+3. 替换程序文件，旧程序保留为同目录下的 `veilfin.old`（Windows 为 `veilfin.old.exe`），出问题时停止服务端换回即可；
+4. 关闭服务端，用新程序重新启动。Linux / macOS 上是原地替换进程（进程号不变，systemd 等进程管理不受影响）；Windows 上会启动新进程后退出旧进程。
+
+服务端默认每 12 小时检查一次更新（只提示，不会自动安装），可以在「服务器设置」里关闭。访问 GitHub 使用「服务器设置 → 网络」里的代理，未设置时使用 `HTTPS_PROXY` 环境变量。以下情况不能在线更新，页面上会给出说明：
+
+- 运行在 Docker 容器中：容器重建后替换的程序会丢失，请 `git pull && docker compose up -d --build`；
+- 运行服务端的用户没有程序所在目录的写权限（例如程序放在 `/usr/local/bin` 而服务以普通用户运行）。
+
+本地客户端不会随服务端更新，需要自行下载新版本。从其他仓库（例如自己的 fork）检查更新时，设置环境变量 `VF_UPDATE_REPO=用户名/仓库名`。
+
 ## 命令
 
 ```
@@ -127,7 +143,7 @@ veilfin restore  -in 文件 [-data ./data] [-force]     恢复（先停止服务
 veilfin user reset-password -name 用户名 [-data ./data]   忘记密码时重置
 ```
 
-服务端的选项都可以用环境变量设置：`VF_LISTEN`、`VF_DATA`、`VF_MEDIA`、`VF_WEB=0`（关闭网页模式）、`VF_API_BASE`、`VF_WEB_ORIGIN`、`VF_FFMPEG`。
+服务端的选项都可以用环境变量设置：`VF_LISTEN`、`VF_DATA`、`VF_MEDIA`、`VF_WEB=0`（关闭网页模式）、`VF_API_BASE`、`VF_WEB_ORIGIN`、`VF_FFMPEG`；`VF_UPDATE_REPO` 指定检查更新的仓库。
 
 ## 构建
 

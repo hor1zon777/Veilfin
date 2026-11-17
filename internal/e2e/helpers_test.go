@@ -93,13 +93,16 @@ func hasFFmpeg() bool {
 
 func newEnv(t *testing.T) *env { return newEnvWith(t, server.Config{}) }
 
-// newEnvWith 用指定的配置启动服务端（DataDir 和 Version 由测试环境填写）。
+// newEnvWith 用指定的配置启动服务端（DataDir 由测试环境填写，Version 默认为 "test"）。
 func newEnvWith(t *testing.T, cfg server.Config) *env {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	e := &env{t: t, ctx: ctx, dataDir: t.TempDir(), mediaDir: t.TempDir()}
-	cfg.DataDir, cfg.Version = e.dataDir, "test"
+	cfg.DataDir = e.dataDir
+	if cfg.Version == "" {
+		cfg.Version = "test"
+	}
 	srv, err := server.New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

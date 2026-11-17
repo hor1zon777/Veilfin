@@ -50,10 +50,24 @@ type Settings struct {
 	TrickplayEnabled  bool   `json:"trickplayEnabled"`
 	// KeepPageTitle 为真时，播放视频不会把浏览器标签页标题改成视频名称
 	KeepPageTitle bool `json:"keepPageTitle"`
+	// AutoCheckUpdate 为真时服务端定时访问 GitHub 检查新版本（只检查，不自动安装）
+	AutoCheckUpdate bool `json:"autoCheckUpdate"`
+	// MetadataWorkers 是同时处理条目（刮削、下载封面、截图、字幕）的线程数
+	MetadataWorkers int `json:"metadataWorkers"`
+	// TrickplayWorkers 是同时生成进度条预览图的线程数（每个线程运行一个 ffmpeg）
+	TrickplayWorkers int `json:"trickplayWorkers"`
 }
 
+// 元数据处理、预览图生成线程数的默认值和上限
+const (
+	DefaultMetadataWorkers  = 4
+	MaxMetadataWorkers      = 32
+	DefaultTrickplayWorkers = 4
+	MaxTrickplayWorkers     = 16
+)
+
 func DefaultSettings() Settings {
-	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, TrickplayEnabled: true}
+	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, TrickplayEnabled: true, AutoCheckUpdate: true, MetadataWorkers: DefaultMetadataWorkers, TrickplayWorkers: DefaultTrickplayWorkers}
 }
 
 type Service struct {
@@ -87,12 +101,15 @@ func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Servi
 		DB:       d,
 		FF:       ff,
 		AssetDir: assetDir,
-		Main:     tasks.New(ctx, "元数据", 2),
-		Heavy:    tasks.New(ctx, "预览图", 1),
+		Main:     tasks.New(ctx, "元数据", DefaultMetadataWorkers),
+		Heavy:    tasks.New(ctx, "预览图", DefaultTrickplayWorkers),
 		baseCtx:  ctx,
 		scanning: map[int64]*rescan{},
 	}
 	s.NewProvider = s.defaultProvider
+	st := s.Settings(ctx)
+	s.Main.SetWorkers(st.MetadataWorkers)
+	s.Heavy.SetWorkers(st.TrickplayWorkers)
 	return s
 }
 
@@ -114,6 +131,7 @@ func (s *Service) Settings(ctx context.Context) Settings {
 	if v, err := s.DB.GetSetting(ctx, "config"); err == nil && v != "" {
 		json.Unmarshal([]byte(v), &st)
 	}
+	st.normalizeWorkers()
 	s.settings = &st
 	return st
 }
@@ -122,6 +140,7 @@ func (s *Service) SaveSettings(ctx context.Context, st Settings) error {
 	if st.ScanIntervalHours < 0 {
 		st.ScanIntervalHours = 0
 	}
+	st.normalizeWorkers()
 	b, _ := json.Marshal(st)
 	if err := s.DB.SetSetting(ctx, "config", string(b)); err != nil {
 		return err
@@ -129,7 +148,25 @@ func (s *Service) SaveSettings(ctx context.Context, st Settings) error {
 	s.mu.Lock()
 	s.settings = &st
 	s.mu.Unlock()
+	s.Main.SetWorkers(st.MetadataWorkers)
+	s.Heavy.SetWorkers(st.TrickplayWorkers)
 	return nil
+}
+
+// normalizeWorkers 把线程数限制在合法范围内，0（未设置）或负数取默认值。
+func (st *Settings) normalizeWorkers() {
+	st.MetadataWorkers = clampWorkers(st.MetadataWorkers, DefaultMetadataWorkers, MaxMetadataWorkers)
+	st.TrickplayWorkers = clampWorkers(st.TrickplayWorkers, DefaultTrickplayWorkers, MaxTrickplayWorkers)
+}
+
+func clampWorkers(n, def, max int) int {
+	switch {
+	case n <= 0:
+		return def
+	case n > max:
+		return max
+	}
+	return n
 }
 
 func (s *Service) defaultProvider(kind string, st Settings) (scraper.Provider, error) {
@@ -165,7 +202,7 @@ func (s *Service) EnqueueScan(libID int64, refresh bool) {
 
 // ScanLibrary 扫描媒体库目录，同步新增 / 变化 / 删除的文件，并把需要处理的条目加入队列。
 func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) error {
-	// 同一个库的扫描不能并行（任务队列有两个工作协程，“扫描”和“扫描并刷新”的 key 也不同）：
+	// 同一个库的扫描不能并行（任务队列有多个工作协程，“扫描”和“扫描并刷新”的 key 也不同）：
 	// 两次扫描各拿一份旧的条目快照，会重复删除、重复插入
 	s.scanMu.Lock()
 	if r := s.scanning[libID]; r != nil {

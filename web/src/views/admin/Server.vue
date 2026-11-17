@@ -35,7 +35,12 @@ onMounted(async () => {
 async function save() {
   busy.value = true
   try {
-    s.value = await rpc('admin.settings.set', { ...s.value, scanIntervalHours: Number(s.value.scanIntervalHours) || 0 })
+    s.value = await rpc('admin.settings.set', {
+      ...s.value,
+      scanIntervalHours: Number(s.value.scanIntervalHours) || 0,
+      metadataWorkers: Math.round(Number(s.value.metadataWorkers)) || 4,
+      trickplayWorkers: Math.round(Number(s.value.trickplayWorkers)) || 4,
+    })
     state.serverName = s.value.serverName
     if (state.me) state.me.keepPageTitle = s.value.keepPageTitle
     toast('设置已保存', 'ok')
@@ -75,9 +80,20 @@ async function save() {
           <label>定时扫描间隔（小时，0 表示关闭）</label>
           <input v-model="s.scanIntervalHours" class="input short" inputmode="numeric" />
         </div>
+        <div class="field">
+          <label>元数据处理线程数（1–32）</label>
+          <input v-model="s.metadataWorkers" class="input short" type="number" min="1" max="32" step="1" inputmode="numeric" />
+          <span class="hint">同时刮削、下载封面、截图的条目数，默认 4。刮削服务限流或服务器性能较弱时可以调低；修改后立即生效。</span>
+        </div>
         <label class="check"><input v-model="s.watchEnabled" type="checkbox" /> 监听目录变化，自动扫描新增 / 删除的文件</label>
         <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（只解码关键帧，3 小时视频约需几十秒）</label>
+        <div v-if="s.trickplayEnabled" class="field sub">
+          <label>预览图生成线程数（1–16）</label>
+          <input v-model="s.trickplayWorkers" class="input short" type="number" min="1" max="16" step="1" inputmode="numeric" />
+          <span class="hint">同时生成预览图的视频数，默认 4。每个线程运行一个 ffmpeg，比较占 CPU 和磁盘读取，建议不超过 CPU 核数的一半；修改后立即生效。</span>
+        </div>
         <label class="check"><input v-model="s.keepPageTitle" type="checkbox" /> 播放视频时网页标题保持不变（不显示正在播放的视频名称）</label>
+        <label class="check"><input v-model="s.autoCheckUpdate" type="checkbox" /> 自动检查更新（每 12 小时访问一次 GitHub，只提示，不会自动安装）</label>
         <p v-if="ffmpegInfo" class="hint ff">正在使用：{{ ffmpegInfo }}</p>
       </section>
 
@@ -103,9 +119,9 @@ async function save() {
       <section class="card-panel d5">
         <h2>网络</h2>
         <div class="field">
-          <label>刮削代理（可选）</label>
+          <label>外网代理（可选）</label>
           <input v-model="s.scraperProxy" class="input" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
-          <span class="hint">只用于在线刮削和下载封面，不影响视频播放。</span>
+          <span class="hint">用于在线刮削、下载封面，以及检查和下载更新，不影响视频播放。</span>
         </div>
       </section>
 
@@ -119,6 +135,7 @@ async function save() {
 h2 { font-size: 16px; margin-bottom: 14px; }
 .short { max-width: 200px; }
 .check { display: flex; margin-bottom: 8px; }
+.sub { margin: 2px 0 12px 24px; }
 .warn { color: var(--warn); margin-bottom: 14px; }
 .ff { margin-top: 6px; word-break: break-all; }
 </style>

@@ -170,3 +170,38 @@ func TestScanKeepsFilesBeingCopied(t *testing.T) {
 		t.Fatalf("正在复制的文件不应导致条目和进度被删除: %+v", all)
 	}
 }
+
+// 元数据处理 / 预览图线程数：默认 4 / 4，保存时限制在合法范围内，并立即应用到任务队列。
+func TestMetadataWorkersSetting(t *testing.T) {
+	e := newEnv(t)
+	admin := e.setupAdmin()
+	var got struct {
+		Settings map[string]any `json:"settings"`
+	}
+	admin.must("admin.settings.get", nil, &got)
+	if got.Settings["metadataWorkers"] != float64(4) || e.srv.Lib.Main.Workers() != 4 {
+		t.Fatalf("默认线程数不正确: %v / %d", got.Settings["metadataWorkers"], e.srv.Lib.Main.Workers())
+	}
+	for _, c := range []struct{ set, want int }{{3, 3}, {100, 32}, {0, 4}, {-5, 4}} {
+		st := got.Settings
+		st["metadataWorkers"] = c.set
+		var out map[string]any
+		admin.must("admin.settings.set", st, &out)
+		if out["metadataWorkers"] != float64(c.want) || e.srv.Lib.Main.Workers() != c.want {
+			t.Fatalf("设置 %d：返回 %v，队列 %d，期望 %d", c.set, out["metadataWorkers"], e.srv.Lib.Main.Workers(), c.want)
+		}
+	}
+
+	if got.Settings["trickplayWorkers"] != float64(4) || e.srv.Lib.Heavy.Workers() != 4 {
+		t.Fatalf("预览图默认线程数不正确: %v / %d", got.Settings["trickplayWorkers"], e.srv.Lib.Heavy.Workers())
+	}
+	for _, c := range []struct{ set, want int }{{2, 2}, {100, 16}, {0, 4}, {1, 1}} {
+		st := got.Settings
+		st["trickplayWorkers"] = c.set
+		var out map[string]any
+		admin.must("admin.settings.set", st, &out)
+		if out["trickplayWorkers"] != float64(c.want) || e.srv.Lib.Heavy.Workers() != c.want {
+			t.Fatalf("预览图设置 %d：返回 %v，队列 %d，期望 %d", c.set, out["trickplayWorkers"], e.srv.Lib.Heavy.Workers(), c.want)
+		}
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"veilfin/internal/media"
 	"veilfin/internal/proto"
 	"veilfin/internal/server"
+	"veilfin/internal/update"
 )
 
 // version 在发布构建时通过 -ldflags "-X main.version=..." 注入。
@@ -161,19 +163,36 @@ func runServer(args []string) error {
 	cfg := server.Config{
 		DataDir: *data, InitialMedia: *media, Web: *web, APIBase: strings.TrimRight(*apiBase, "/"),
 		WebOrigin: strings.TrimRight(*webOrigin, "/"), FFmpegDir: *ffdir, Version: version,
+		UpdateRepo: os.Getenv("VF_UPDATE_REPO"),
+	}
+	// 在线更新：替换程序文件后关闭服务端，再用新程序重新启动进程
+	var reexec atomic.Bool
+	if exe, err := update.Executable(); err == nil {
+		cfg.Executable = exe
+		cfg.Reexec = func() {
+			reexec.Store(true)
+			cfg.Restart()
+		}
+	} else {
+		log.Printf("无法确定程序路径，在线更新不可用: %v", err)
 	}
 	// 管理后台在线恢复时会请求重启：在同一进程内关闭服务端、应用恢复、重新启动，不依赖外部的进程管理
 	for first := true; ; first = false {
-		restart, err := serveOnce(ctx, cfg, *listen, *tlsCert, *tlsKey, first)
+		restart, err := serveOnce(ctx, &cfg, *listen, *tlsCert, *tlsKey, first)
 		if err != nil || !restart {
 			return err
+		}
+		if reexec.Swap(false) {
+			log.Printf("正在启动新版本 %s ……", cfg.Executable)
+			err := update.Reexec(cfg.Executable) // 成功时不会返回
+			log.Printf("启动新版本失败，继续运行当前版本（程序文件已经替换，下次启动时生效）: %v", err)
 		}
 		log.Printf("服务端正在重启……")
 	}
 }
 
 // serveOnce 启动一次服务端，直到收到退出信号（返回 false）或在线恢复请求重启（返回 true）。
-func serveOnce(parent context.Context, cfg server.Config, listen, tlsCert, tlsKey string, first bool) (bool, error) {
+func serveOnce(parent context.Context, cfg *server.Config, listen, tlsCert, tlsKey string, first bool) (bool, error) {
 	applied, err := backup.ApplyPending(cfg.DataDir)
 	if err != nil {
 		return false, err
@@ -190,7 +209,7 @@ func serveOnce(parent context.Context, cfg server.Config, listen, tlsCert, tlsKe
 		default:
 		}
 	}
-	srv, err := server.New(ctx, cfg)
+	srv, err := server.New(ctx, *cfg)
 	if err != nil {
 		return false, err
 	}

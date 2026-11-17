@@ -188,6 +188,9 @@ func (s *Server) startJobLocked(kind, name string) (*backupJob, error) {
 	if s.bk.restarting {
 		return nil, errf(api.CodeBadRequest, "服务端正在重启")
 	}
+	if s.updating.Load() {
+		return nil, errf(api.CodeBadRequest, "服务端正在更新，请等更新完成")
+	}
 	if s.bk.job != nil && s.bk.job.Running {
 		return nil, errf(api.CodeBadRequest, "已有备份或恢复任务正在进行，请等它完成")
 	}
@@ -478,6 +481,9 @@ func rpcBackupRestoreApply(s *Server, c *call) (any, error) {
 	}
 	if s.bk.staged == nil {
 		return nil, errf(api.CodeBadRequest, "没有待确认的恢复，请重新选择备份")
+	}
+	if s.updating.Load() {
+		return nil, errf(api.CodeBadRequest, "服务端正在更新，请等更新完成")
 	}
 	if s.bk.job != nil && s.bk.job.Running {
 		return nil, errf(api.CodeBadRequest, "已有备份或恢复任务正在进行，请等它完成")

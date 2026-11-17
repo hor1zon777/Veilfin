@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"veilfin/internal/api"
@@ -29,6 +30,7 @@ import (
 	"veilfin/internal/media"
 	"veilfin/internal/mediacrypt"
 	"veilfin/internal/proto"
+	"veilfin/internal/update"
 	"veilfin/internal/webui"
 )
 
@@ -59,6 +61,17 @@ type Config struct {
 	// Restart 由管理后台在线恢复时调用：请求外层关闭并重新启动服务端（在此之前会应用待恢复的数据）。
 	// 为 nil 时不支持在线恢复。
 	Restart func()
+	// Executable 是正在运行的程序文件（解析过符号链接），在线更新时替换它。
+	Executable string
+	// Reexec 由在线更新调用：请求外层关闭服务端，然后用 Executable（已替换为新版本）重新启动进程。
+	// 为 nil 时不支持在线更新。
+	Reexec func()
+	// UpdateRepo 是检查更新的 GitHub 仓库（owner/name），默认 hor1zon777/Veilfin。
+	UpdateRepo string
+	// UpdateAPI 是 GitHub API 地址（测试用），默认 https://api.github.com。
+	UpdateAPI string
+	// VerifyUpdate 试运行下载的新程序确认版本号（测试用），默认 update.Verify。
+	VerifyUpdate func(ctx context.Context, path string, want update.Version) error
 	// SetupWindow 是尚未初始化时，从启动起允许在网页上完成初始化的时长，默认 30 分钟。
 	// 超时后需要重启服务端重新计时，防止公网上的其他人在管理员之前抢先完成初始化。
 	SetupWindow time.Duration
@@ -88,7 +101,9 @@ type Server struct {
 	ucMu      sync.Mutex
 	userCache map[int64]*userAccess
 
-	bk backupState
+	bk       backupState
+	upd      updateState
+	updating atomic.Bool // 正在在线更新：不允许开始新的备份 / 恢复
 
 	now func() time.Time
 }
@@ -126,6 +141,9 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		now:       time.Now,
 	}
 	s.cleanBackupDir()
+	if cfg.Executable != "" {
+		os.Remove(update.NewPath(cfg.Executable)) // 上次没有完成的更新下载
+	}
 	n, err := d.CountUsers(ctx)
 	if err != nil {
 		return nil, err
@@ -198,6 +216,7 @@ func (s *Server) DropSessions() { s.sessions.clear() }
 // Run 启动后台任务：会话清理、定时扫描、目录监听。
 func (s *Server) Run(ctx context.Context) {
 	go s.Lib.RunScheduler(ctx)
+	go s.runUpdateChecker(ctx)
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {

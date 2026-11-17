@@ -441,7 +441,7 @@ func rpcSettingsSet(s *Server, c *call) (any, error) {
 	if old.WatchEnabled != st.WatchEnabled {
 		s.Lib.RestartWatcher()
 	}
-	return st, nil
+	return s.Lib.Settings(c.ctx), nil // 返回规范化之后的值（例如线程数超出范围时被限制）
 }
 
 func rpcStats(s *Server, c *call) (any, error) {

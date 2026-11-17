@@ -326,6 +326,7 @@ type card struct {
 	Position   float64 `json:"position"`
 	Played     bool    `json:"played"`
 	PlayCount  int     `json:"playCount"`
+	LastPlayed int64   `json:"lastPlayed"`
 }
 
 type listResult struct {
@@ -370,6 +371,15 @@ type playResult struct {
 	Next *struct {
 		ID int64 `json:"id"`
 	} `json:"next"`
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func findByTitle(t *testing.T, items []card, title string) card {

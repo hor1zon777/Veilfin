@@ -1,8 +1,9 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { rpc, toastError } from '../store.js'
-import { debounce, kindNames } from '../util.js'
+import { rpc, toast, toastError } from '../store.js'
+import { debounce, kindNames, randomSeed } from '../util.js'
+import { setQueue } from '../queue.js'
 import MediaCard from '../components/MediaCard.vue'
 import Icon from '../components/Icon.vue'
 import { useIndicator } from '../composables/indicator.js'
@@ -17,7 +18,7 @@ const folders = ref([])
 const total = ref(0)
 const loading = ref(false)
 const done = ref(false)
-const filters = ref({ genre: [], tag: [], actor: [] })
+const filters = ref({ genre: [], tag: [], actor: [], studio: [], series: [], years: [] })
 const sentinel = ref(null)
 const PAGE = 60
 
@@ -29,6 +30,9 @@ const searchText = ref(q.value.q || '')
 const seg = ref(null)
 const { style: thumbStyle } = useIndicator(seg, 'button.on', () => browse.value)
 const firstLoad = ref(true)
+const showFilters = ref(false)
+const expanded = ref({}) // 哪些筛选分组展开了全部选项
+const shuffling = ref(false)
 
 const shape = computed(() => (lib.value?.kind === 'home' ? 'thumb' : 'poster'))
 const crumbs = computed(() => {
@@ -36,13 +40,86 @@ const crumbs = computed(() => {
   return parts.map((name, i) => ({ name, path: parts.slice(0, i + 1).join('/') }))
 })
 
+// ---- 筛选分组 ----
+const fixed = {
+  status: { name: '观看状态', opts: [['unplayed', '未看'], ['inprogress', '观看中'], ['played', '已看']] },
+  res: { name: '分辨率', opts: [['4k', '4K'], ['1080', '1080p'], ['720', '720p'], ['sd', '标清']] },
+  dur: { name: '时长', opts: [['short', '20 分钟内'], ['medium', '20–60 分钟'], ['long', '1–2 小时'], ['xlong', '2 小时以上']] },
+}
+// URL 参数名 → 筛选项来源
+const dynamic = [
+  ['genre', '类型', 'genre'],
+  ['label', '标签', 'tag'],
+  ['actor', '演员', 'actor'],
+  ['studio', '制作', 'studio'],
+  ['series', '系列', 'series'],
+  ['year', '年份', 'years'],
+]
+const FILTER_KEYS = [...Object.keys(fixed), ...dynamic.map((d) => d[0])]
+const COLLAPSED = 18
+
+const sections = computed(() => {
+  const out = Object.entries(fixed).map(([key, f]) => ({ key, name: f.name, opts: f.opts }))
+  for (const [key, name, src] of dynamic) {
+    const list = (filters.value[src] || []).map((v) => [String(v), String(v)])
+    if (list.length) out.push({ key, name, opts: list })
+  }
+  return out.map((s) => {
+    const cur = q.value[s.key]
+    let shown = s.opts
+    const more = s.opts.length > COLLAPSED && !expanded.value[s.key]
+    if (more) {
+      shown = s.opts.slice(0, COLLAPSED)
+      // 当前选中的值即使排在后面也要显示出来
+      if (cur && !shown.some((o) => o[0] === cur)) shown = [...shown, s.opts.find((o) => o[0] === cur) || [cur, cur]]
+    }
+    return { ...s, shown, more, hidden: s.opts.length - shown.length }
+  })
+})
+
+const active = computed(() =>
+  sections.value
+    .filter((s) => q.value[s.key])
+    .map((s) => ({ key: s.key, text: `${s.name}：${s.opts.find((o) => o[0] === q.value[s.key])?.[1] || q.value[s.key]}` })),
+)
+// 区块还没加载出来时（例如直接打开带筛选条件的链接），也按 URL 计数
+const activeCount = computed(() => FILTER_KEYS.filter((k) => q.value[k]).length)
+
 function setQuery(patch) {
   const next = { ...route.query, ...patch }
   for (const k of Object.keys(next)) if (next[k] === '' || next[k] == null) delete next[k]
   router.replace({ query: next })
 }
+function pick(key, val) {
+  setQuery({ [key]: q.value[key] === val ? '' : val })
+}
+function clearFilters() {
+  setQuery(Object.fromEntries(FILTER_KEYS.map((k) => [k, ''])))
+}
+function setSort(v) {
+  setQuery({ sort: v, seed: v === 'random' ? String(randomSeed()) : '' })
+}
+function reshuffle() {
+  setQuery({ seed: String(randomSeed()) })
+}
 const applySearch = debounce((v) => setQuery({ q: v }), 350)
 watch(searchText, applySearch)
+
+// 当前页面的查询参数（列表和随机播放共用）
+function params() {
+  const x = q.value
+  const p = {
+    libraryId: Number(props.id),
+    browse: browse.value,
+    folder: folder.value,
+    q: x.q || '',
+    sort: x.sort || 'added',
+    desc: x.order !== 'asc',
+    seed: Number(x.seed) || 0,
+  }
+  for (const k of FILTER_KEYS) if (x[k]) p[k] = x[k]
+  return p
+}
 
 async function load(reset) {
   if (loading.value) return
@@ -54,20 +131,7 @@ async function load(reset) {
   if (done.value) return
   loading.value = true
   try {
-    const played = q.value.played === 'yes' ? true : q.value.played === 'no' ? false : undefined
-    const r = await rpc('items.list', {
-      libraryId: Number(props.id),
-      browse: browse.value,
-      folder: folder.value,
-      q: q.value.q || '',
-      kind: q.value.kind || '',
-      tag: q.value.tag || '',
-      played,
-      sort: q.value.sort || 'added',
-      desc: q.value.order !== 'asc',
-      offset: items.value.length,
-      limit: PAGE,
-    })
+    const r = await rpc('items.list', { ...params(), offset: items.value.length, limit: PAGE })
     if (reset) folders.value = r.folders || []
     items.value.push(...r.items)
     total.value = r.total
@@ -83,6 +147,26 @@ async function load(reset) {
   checkSentinel()
 }
 
+// 随机播放：按当前的筛选条件（文件夹视图下包含子文件夹）打乱顺序，生成播放队列
+async function shufflePlay() {
+  if (shuffling.value) return
+  shuffling.value = true
+  try {
+    const r = await rpc('items.ids', { ...params(), sort: 'random', seed: randomSeed() })
+    if (!r.ids.length) {
+      toast('没有可以播放的视频')
+      return
+    }
+    const where = browse.value && folder.value ? folder.value.split('/').pop() : lib.value?.name || '媒体库'
+    setQueue(r.ids, `随机播放 · ${where}${activeCount.value ? '（已筛选）' : ''}`)
+    router.push({ path: `/play/${r.ids[0]}`, query: { queue: '1' } })
+  } catch (e) {
+    toastError(e)
+  } finally {
+    shuffling.value = false
+  }
+}
+
 let io = null
 function checkSentinel() {
   if (!sentinel.value || done.value) return
@@ -90,7 +174,24 @@ function checkSentinel() {
   if (r.top < window.innerHeight + 600) load(false)
 }
 
+// 兼容旧链接：?kind=actor&tag=X、?played=yes
+function migrateQuery() {
+  const x = route.query
+  const patch = {}
+  if (x.kind && x.tag) patch[{ tag: 'label' }[x.kind] || x.kind] = x.tag
+  if (x.kind || x.tag) Object.assign(patch, { kind: '', tag: '' })
+  if (x.played) Object.assign(patch, { played: '', status: x.played === 'yes' ? 'played' : 'unplayed' })
+  if (x.sort === 'random' && !x.seed) patch.seed = String(randomSeed())
+  if (Object.keys(patch).length) {
+    setQuery(patch)
+    return true
+  }
+  return false
+}
+
 onMounted(async () => {
+  const migrated = migrateQuery()
+  if (activeCount.value) showFilters.value = true
   try {
     const libs = await rpc('lib.list')
     lib.value = libs.find((l) => String(l.id) === props.id) || null
@@ -100,12 +201,11 @@ onMounted(async () => {
   }
   io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && load(false), { rootMargin: '600px' })
   if (sentinel.value) io.observe(sentinel.value)
-  load(true)
+  if (!migrated) load(true) // 改写了 URL 的话由下面的 watch 触发加载
 })
 onBeforeUnmount(() => io?.disconnect())
-watch(() => route.query, () => load(true), { deep: true })
-
-const tagOptions = computed(() => filters.value[q.value.kind] || [])
+// 离开页面（过渡动画期间路由已经变了）时不要按新页面的参数重新加载
+watch(() => route.query, () => route.path === `/library/${props.id}` && load(true), { deep: true })
 </script>
 
 <template>
@@ -122,33 +222,53 @@ const tagOptions = computed(() => filters.value[q.value.kind] || [])
         <button :class="{ on: browse }" @click="setQuery({ view: 'folders' })"><Icon name="folder" :size="16" /> 文件夹</button>
       </div>
       <input v-model="searchText" class="input search" placeholder="在此媒体库中搜索标题、番号、演员…" />
-      <select class="input sel" :value="q.sort || 'added'" @change="setQuery({ sort: $event.target.value })">
+      <select class="input sel" :value="q.sort || 'added'" @change="setSort($event.target.value)">
         <option value="added">添加时间</option>
         <option value="title">标题</option>
         <option value="release">发行日期</option>
         <option value="duration">时长</option>
+        <option value="rating">评分</option>
         <option value="lastPlayed">最近播放</option>
         <option value="random">随机</option>
       </select>
-      <button class="btn" :title="q.order === 'asc' ? '升序' : '降序'" @click="setQuery({ order: q.order === 'asc' ? '' : 'asc' })">
-        {{ q.order === 'asc' ? '↑ 升序' : '↓ 降序' }}
+      <Transition name="swap-btn" mode="out-in">
+        <button v-if="q.sort === 'random'" key="re" class="btn" title="重新打乱顺序" @click="reshuffle"><Icon name="shuffle" :size="18" /> 换一批</button>
+        <button v-else key="ord" class="btn" :title="q.order === 'asc' ? '升序' : '降序'" @click="setQuery({ order: q.order === 'asc' ? '' : 'asc' })">
+          {{ q.order === 'asc' ? '↑ 升序' : '↓ 降序' }}
+        </button>
+      </Transition>
+      <button class="btn filter-btn" :class="{ open: showFilters, has: activeCount }" @click="showFilters = !showFilters">
+        <Icon name="filter" :size="18" /> 筛选
+        <Transition name="badge-pop"><span v-if="activeCount" :key="activeCount" class="fcount">{{ activeCount }}</span></Transition>
       </button>
-      <select class="input sel" :value="q.played || ''" @change="setQuery({ played: $event.target.value })">
-        <option value="">全部</option>
-        <option value="no">未看</option>
-        <option value="yes">已看</option>
-      </select>
-      <select class="input sel" :value="q.kind || ''" @change="setQuery({ kind: $event.target.value, tag: '' })">
-        <option value="">按标签筛选</option>
-        <option value="genre" :disabled="!filters.genre?.length">类型</option>
-        <option value="tag" :disabled="!filters.tag?.length">标签</option>
-        <option value="actor" :disabled="!filters.actor?.length">演员</option>
-      </select>
-      <select v-if="q.kind" class="input sel" :value="q.tag || ''" @change="setQuery({ tag: $event.target.value })">
-        <option value="">（全部）</option>
-        <option v-for="t in tagOptions" :key="t" :value="t">{{ t }}</option>
-      </select>
+      <div class="spacer" />
+      <button class="btn primary shuffle-btn" :disabled="shuffling || (!total && !folders.length)" title="按当前筛选条件随机连续播放" @click="shufflePlay">
+        <Icon name="shuffle" :size="18" /> 随机播放
+      </button>
     </div>
+
+    <!-- 筛选面板：用 grid 行高从 0fr 过渡到 1fr，展开收起都跟随弹簧曲线 -->
+    <div class="fpanel-wrap" :class="{ open: showFilters }">
+      <div class="fpanel-clip">
+        <div class="fpanel">
+          <div v-for="s in sections" :key="s.key" class="fsec">
+            <div class="fname">{{ s.name }}</div>
+            <div class="fopts">
+              <button v-for="o in s.shown" :key="o[0]" class="fchip" :class="{ on: q[s.key] === o[0] }" @click="pick(s.key, o[0])">{{ o[1] }}</button>
+              <button v-if="s.more" class="fchip more" @click="expanded[s.key] = true">更多 {{ s.hidden }} 个…</button>
+              <button v-else-if="expanded[s.key]" class="fchip more" @click="expanded[s.key] = false">收起</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <TransitionGroup v-if="active.length" tag="div" name="achip" class="active-bar">
+      <button v-for="a in active" :key="a.key" class="achip" :title="'移除筛选：' + a.text" @click="setQuery({ [a.key]: '' })">
+        {{ a.text }} <Icon name="close" :size="14" />
+      </button>
+      <button key="__clear" class="clear-all" @click="clearFilters">清除全部</button>
+    </TransitionGroup>
 
     <Transition name="slide-up">
       <TransitionGroup v-if="browse" tag="div" name="crumb" class="crumbs">
@@ -175,7 +295,11 @@ const tagOptions = computed(() => filters.value[q.value.kind] || [])
       <MediaCard v-for="(it, i) in items" :key="it.id" :item="it" :shape="shape" :index="i" />
     </div>
     <div v-if="!loading && !items.length && !folders.length" class="empty rise">
-      {{ q.q || q.tag || q.played ? '没有符合条件的视频' : lib ? `这个${kindNames[lib.kind] || ''}媒体库还是空的` : '' }}
+      <template v-if="q.q || activeCount">
+        <p>没有符合条件的视频</p>
+        <button v-if="activeCount" class="btn" @click="clearFilters">清除筛选条件</button>
+      </template>
+      <template v-else>{{ lib ? `这个${kindNames[lib.kind] || ''}媒体库还是空的` : '' }}</template>
     </div>
     <div ref="sentinel" class="sentinel" />
     <Transition name="fade">
@@ -186,7 +310,7 @@ const tagOptions = computed(() => filters.value[q.value.kind] || [])
 
 <style scoped>
 .count { font-size: 15px; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; align-items: center; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; align-items: center; }
 .search { width: 280px; max-width: 100%; }
 .sel { width: auto; padding-right: 28px; }
 /* iOS 分段控件：选中块在两个选项之间滑动 */
@@ -194,6 +318,52 @@ const tagOptions = computed(() => filters.value[q.value.kind] || [])
 .seg button { position: relative; z-index: 1; padding: 6px 14px; display: inline-flex; align-items: center; gap: 4px; border-radius: 8px; color: var(--muted); transition: color .3s var(--ease-out), transform .35s var(--spring-bouncy); }
 .seg button.on { color: #fff; }
 .seg-thumb { left: 0; top: 0; border-radius: 8px; background: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+
+.swap-btn-enter-active { transition: opacity .2s, transform .4s var(--spring-bouncy); }
+.swap-btn-leave-active { transition: opacity .12s, transform .12s; }
+.swap-btn-enter-from, .swap-btn-leave-to { opacity: 0; transform: scale(.85); }
+
+.filter-btn { position: relative; }
+.filter-btn.open, .filter-btn.has { color: var(--accent); }
+.filter-btn.open { background: rgba(82,181,75,.14); }
+.fcount { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; }
+.badge-pop-enter-active { transition: transform .45s var(--spring-bouncy), opacity .2s; }
+.badge-pop-leave-active { transition: transform .15s, opacity .15s; position: absolute; right: 6px; }
+.badge-pop-enter-from, .badge-pop-leave-to { transform: scale(0); opacity: 0; }
+.shuffle-btn:active:not(:disabled) .icon { transform: rotate(180deg); }
+.shuffle-btn .icon { transition: transform .5s var(--spring-bouncy); }
+
+/* 筛选面板 */
+.fpanel-wrap { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .55s var(--spring), opacity .3s var(--ease-out), margin .55s var(--spring); }
+.fpanel-wrap.open { grid-template-rows: 1fr; opacity: 1; margin-bottom: 16px; }
+.fpanel-clip { min-height: 0; overflow: hidden; }
+.fpanel { display: grid; gap: 12px; padding: 16px 18px; border-radius: 14px; background: rgba(255,255,255,.035); border: 0.5px solid rgba(255,255,255,.08);
+  transform: translate3d(0, -10px, 0) scale(.985); transform-origin: top center; transition: transform .55s var(--spring); }
+.open .fpanel { transform: none; }
+.fsec { display: flex; gap: 14px; align-items: flex-start; }
+.fsec .fname { width: 64px; flex-shrink: 0; padding-top: 5px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.fopts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.fchip { padding: 4px 12px; border-radius: 999px; background: var(--panel2); font-size: 13px; color: #ddd; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: background-color .25s var(--ease-out), color .25s, box-shadow .25s, transform .35s var(--spring-bouncy); }
+.fchip:hover { background: #363636; }
+.fchip:active { transform: scale(.92); transition-duration: .08s; }
+.fchip.on { background: var(--accent); color: #fff; box-shadow: 0 2px 10px rgba(82,181,75,.35); }
+.fchip.more { background: transparent; color: var(--accent); }
+
+/* 已选条件 */
+.active-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
+.achip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px 4px 12px; border-radius: 999px; font-size: 13px;
+  background: rgba(82,181,75,.16); color: #cfeccc; border: 0.5px solid rgba(82,181,75,.35); transition: background-color .2s, transform .35s var(--spring-bouncy); }
+.achip:hover { background: rgba(82,181,75,.28); }
+.achip:active { transform: scale(.94); }
+.clear-all { font-size: 13px; color: var(--muted); padding: 4px 6px; transition: color .2s; }
+.clear-all:hover { color: #fff; }
+.achip-enter-active { transition: opacity .25s, transform .45s var(--spring-bouncy); }
+.achip-leave-active { transition: opacity .15s, transform .2s; position: absolute; }
+.achip-enter-from, .achip-leave-to { opacity: 0; transform: scale(.7); }
+.achip-move { transition: transform .45s var(--spring); }
+
 .skel-card.poster { aspect-ratio: 2 / 3; }
 .skel-card.thumb { aspect-ratio: 16 / 9; }
 .crumb { display: inline-flex; align-items: center; gap: 6px; }
@@ -210,7 +380,13 @@ const tagOptions = computed(() => filters.value[q.value.kind] || [])
 .folder .fi { transition: transform .45s var(--spring-bouncy); }
 .folder:hover .fi { transform: scale(1.12) rotate(-6deg); }
 .fi { color: #d9b44a; }
-.fname { margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder .fname { margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.empty .btn { margin-top: 12px; }
 .small { font-size: 12px; }
 .sentinel { height: 1px; }
+@media (max-width: 600px) {
+  .fsec { flex-direction: column; gap: 6px; }
+  .fsec .fname { padding-top: 0; }
+  .spacer { display: none; }
+}
 </style>

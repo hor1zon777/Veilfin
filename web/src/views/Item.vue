@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { state, rpc, toast, toastError } from '../store.js'
-import { fmtDuration, fmtSize, fmtTime, resolutionLabel, placeholderStyle } from '../util.js'
+import { fmtDuration, fmtSize, fmtTime, fmtAgo, fmtDateTime, fmtRemain, resolutionLabel, placeholderStyle } from '../util.js'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import ItemEditor from '../components/ItemEditor.vue'
@@ -71,10 +71,12 @@ function containerName(x) {
   if (x.container?.includes('mp4')) return 'mp4'
   return x.container?.split(',')[0] || ''
 }
-const resumable = computed(() => it.value && it.value.position > 0 && !it.value.played)
+// 有进度就可以续播（包括重看已看过的视频）
+const resumable = computed(() => it.value && it.value.position > 0)
+const watchPct = computed(() => (it.value?.duration ? Math.min(100, (it.value.position / it.value.duration) * 100) : 0))
 
 function play(resume) {
-  router.push({ path: `/play/${it.value.id}`, query: resume ? { t: Math.floor(it.value.position) } : {} })
+  router.push({ path: `/play/${it.value.id}`, query: { t: resume ? Math.floor(it.value.position) : 0 } })
 }
 
 async function togglePlayed() {
@@ -87,8 +89,9 @@ async function togglePlayed() {
   }
 }
 
+// 点击标签 / 制作 / 系列：跳到媒体库并按它筛选（kind=tag 在 URL 里叫 label）
 function tagLink(kind, name) {
-  return { path: `/library/${it.value.libraryId}`, query: { kind, tag: name } }
+  return { path: `/library/${it.value.libraryId}`, query: { [kind === 'tag' ? 'label' : kind]: name } }
 }
 
 async function doRefresh() {
@@ -178,6 +181,17 @@ function openRescrape() {
           <Transition name="swap-badge"><span v-if="it.played" class="played"><Icon name="check" :size="16" /> 已看过</span></Transition>
         </div>
 
+        <div v-if="it.lastPlayed" class="watch rise d4" :title="'上次观看：' + fmtDateTime(it.lastPlayed)">
+          <span>上次观看 {{ fmtAgo(it.lastPlayed) }}</span>
+          <template v-if="resumable">
+            <span class="dot">·</span>
+            <span>看到 {{ fmtTime(it.position) }}</span>
+            <span class="wbar"><span :style="{ transform: `scaleX(${watchPct / 100})` }" /></span>
+            <span class="muted">{{ fmtRemain(it) }}</span>
+          </template>
+          <template v-if="it.playCount > 0"><span class="dot">·</span><span>看过 {{ it.playCount }} 次</span></template>
+        </div>
+
         <div class="actions rise d4">
           <button class="btn primary big" @click="play(resumable)">
             <Icon name="play" /> {{ resumable ? `继续播放 ${fmtTime(it.position)}` : '播放' }}
@@ -218,9 +232,9 @@ function openRescrape() {
         </div>
 
         <dl class="meta rise d8">
-          <template v-if="it.studio"><dt>制作</dt><dd>{{ it.studio }}</dd></template>
+          <template v-if="it.studio"><dt>制作</dt><dd><router-link class="mlink" :to="tagLink('studio', it.studio)">{{ it.studio }}</router-link></dd></template>
           <template v-if="it.director"><dt>导演</dt><dd>{{ it.director }}</dd></template>
-          <template v-if="it.series"><dt>系列</dt><dd>{{ it.series }}</dd></template>
+          <template v-if="it.series"><dt>系列</dt><dd><router-link class="mlink" :to="tagLink('series', it.series)">{{ it.series }}</router-link></dd></template>
           <template v-if="it.releaseDate"><dt>发行日期</dt><dd>{{ it.releaseDate }}</dd></template>
           <dt>文件</dt>
           <dd>
@@ -294,6 +308,12 @@ function openRescrape() {
 .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 12px 0 22px; color: #ddd; }
 .code { font-weight: 600; letter-spacing: .5px; }
 .played { color: var(--accent); display: inline-flex; align-items: center; gap: 4px; }
+.watch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -10px 0 18px; font-size: 13.5px; color: #cfcfcf; }
+.watch .dot { color: var(--muted); }
+.wbar { position: relative; width: 120px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.15); overflow: hidden; }
+.wbar span { position: absolute; inset: 0; background: var(--accent); transform-origin: left; animation: wgrow 1s var(--spring) .3s both; }
+@keyframes wgrow { from { transform: scaleX(0); } }
+.mlink:hover { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 24px; }
 .on { color: var(--accent); }
 .more { position: relative; }

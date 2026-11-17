@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { state, rpc, toastError, requestPin } from '../store.js'
-import { kindNames, placeholderStyle } from '../util.js'
+import { kindNames, placeholderStyle, fmtAgo, fmtRemain } from '../util.js'
 import MediaRow from '../components/MediaRow.vue'
 import MediaCard from '../components/MediaCard.vue'
 import Icon from '../components/Icon.vue'
@@ -59,7 +59,10 @@ async function openLib(l) {
           </button>
         </MediaRow>
 
-        <MediaRow v-if="data.continue.length" title="继续观看" shape="thumb" :items="data.continue" :index="1" />
+        <MediaRow v-if="data.continue.length" title="继续观看" shape="thumb" :index="1">
+          <MediaCard v-for="(it, i) in data.continue" :key="it.id" :item="it" shape="thumb" :index="i" :to="`/play/${it.id}`"
+            :subtitle="[fmtAgo(it.lastPlayed), fmtRemain(it)].filter(Boolean).join(' · ')" />
+        </MediaRow>
 
         <MediaRow v-for="(row, ri) in data.latest" :key="row.library.id" :title="`最近添加 · ${row.library.name}`" :to="`/library/${row.library.id}`"
           :shape="shapeOf(row.library.kind)" :index="ri + 2">

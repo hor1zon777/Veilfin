@@ -535,6 +535,54 @@ func (d *DB) TopTags(ctx context.Context, libs []int64, kind string, limit int) 
 	return out, rows.Err()
 }
 
+// TopColumn 返回若干媒体库中 studio / series 列最常见的取值，用于筛选。
+func (d *DB) TopColumn(ctx context.Context, libs []int64, col string, limit int) ([]string, error) {
+	if len(libs) == 0 || (col != "studio" && col != "series") {
+		return nil, nil
+	}
+	args := append(int64Args(libs), limit)
+	return scanStrings(d.R.QueryContext(ctx, `SELECT `+col+` FROM items WHERE library_id IN (`+placeholders(len(libs))+`) AND `+col+`<>''
+		GROUP BY `+col+` ORDER BY COUNT(*) DESC, `+col+` LIMIT ?`, args...))
+}
+
+// Years 返回若干媒体库中出现过的年份（从新到旧）。
+func (d *DB) Years(ctx context.Context, libs []int64) ([]int, error) {
+	if len(libs) == 0 {
+		return nil, nil
+	}
+	rows, err := d.R.QueryContext(ctx, `SELECT DISTINCT year FROM items WHERE library_id IN (`+placeholders(len(libs))+`) AND year>0 ORDER BY year DESC`,
+		int64Args(libs)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var y int
+		if err := rows.Scan(&y); err != nil {
+			return nil, err
+		}
+		out = append(out, y)
+	}
+	return out, rows.Err()
+}
+
+func scanStrings(rows *sql.Rows, err error) ([]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ---- 图片和预览图 ----
 
 // SetImage 设置条目的图片（poster/backdrop/thumb），返回被替换下来的旧对象文件路径。

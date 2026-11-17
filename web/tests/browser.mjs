@@ -220,6 +220,101 @@ async function playbackTest(page, base, label) {
   await shot(page, `${label}-home`)
 }
 
+// 续播、上次观看时间、筛选、随机播放（接在 playbackTest 之后：家庭聚会已有约 40 秒的进度）
+async function featureTest(page, base, label) {
+  // 点“继续观看”里的卡片直接进入播放器，并从上次的位置继续
+  const contHref = await page.$$eval('.row-sec', (secs) => {
+    const s = secs.find((x) => x.querySelector('.section-title')?.textContent.includes('继续观看'))
+    return s?.querySelector('.card')?.getAttribute('href')
+  })
+  ok(!!contHref && contHref.includes('/play/'), `${label}：继续观看的卡片直接打开播放器（${contHref}）`)
+  await page.goto(base + '/' + contHref, { waitUntil: 'networkidle2' })
+  const resumedAt = await page
+    .waitForFunction(() => {
+      const v = document.querySelector('video')
+      return v && !v.paused && v.currentTime > 30 && v.currentTime
+    }, { timeout: 20000 })
+    .then((h) => h.jsonValue())
+    .catch(() => 0)
+  ok(resumedAt > 30, `${label}：自动从上次的位置继续播放（${Number(resumedAt).toFixed(1)}s）`)
+  ok(!!(await page.$('.resume-chip')), `${label}：显示“已从 xx 继续播放”提示`)
+  await shot(page, `${label}-resume`)
+  await page.click('.resume-chip .btn')
+  const restarted = await page
+    .waitForFunction(() => document.querySelector('video').currentTime < 5 && !document.querySelector('.resume-chip'), { timeout: 10000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(restarted, `${label}：点击“从头播放”回到开头`)
+  await page.$eval('video', (v) => (v.currentTime = 50))
+  await sleep(2500)
+  await page.click('.top .icon-btn')
+  await sleep(1200)
+
+  // 详情页显示上次观看时间和进度
+  const partyId = contHref.match(/play\/(\d+)/)[1]
+  await page.goto(`${base}/#/item/${partyId}`, { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.detail .title')
+  const watch = await page.$eval('.watch', (e) => e.textContent).catch(() => '')
+  ok(watch.includes('上次观看') && watch.includes('看到'), `${label}：详情页显示上次观看时间和进度（${watch.replace(/\s+/g, ' ').trim()}）`)
+  const btn = await page.$eval('.actions .btn.primary', (e) => e.textContent)
+  ok(btn.includes('继续播放'), `${label}：详情页主按钮为“继续播放”`)
+
+  // 筛选面板
+  await page.goto(`${base}/#/library/1`, { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  const before = await page.$$eval('.grid .card', (c) => c.length)
+  await page.click('.filter-btn')
+  await page.waitForSelector('.fpanel-wrap.open')
+  await sleep(700)
+  await shot(page, `${label}-filters`)
+  const yearChip = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.fsec')].find((s) => s.querySelector('.fname').textContent === '年份')?.querySelector('.fchip'),
+  )
+  ok(!!yearChip.asElement(), `${label}：筛选面板列出年份`)
+  if (yearChip.asElement()) {
+    await yearChip.asElement().click()
+    const filtered = await page
+      .waitForFunction(() => location.hash.includes('year=2023') && document.querySelectorAll('.grid .card').length === 1, { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false)
+    ok(filtered && before > 1, `${label}：按年份筛选后只剩 1 个视频（之前 ${before} 个）`)
+    ok(!!(await page.$('.achip')), `${label}：显示已选筛选条件`)
+    await shot(page, `${label}-filtered`)
+    await page.click('.clear-all')
+    await page.waitForFunction((n) => !location.hash.includes('year=') && document.querySelectorAll('.grid .card').length === n, { timeout: 10000 }, before)
+    ok(true, `${label}：清除筛选后恢复全部视频`)
+  }
+  // 状态筛选：“观看中”
+  await page.goto(`${base}/#/library/1?status=inprogress`, { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  await sleep(500)
+  const inprog = await page.$$eval('.grid .card .title', (t) => t.map((x) => x.textContent))
+  ok(inprog.length === 1 && inprog[0].includes('家庭聚会'), `${label}：“观看中”筛选（${inprog.join('、')}）`)
+
+  // 随机播放：生成队列，播完自动切到下一个
+  await page.goto(`${base}/#/library/1`, { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  await page.click('.shuffle-btn')
+  await page.waitForFunction(() => location.hash.includes('/play/') && location.hash.includes('queue=1'), { timeout: 10000 })
+  await page.waitForSelector('.qinfo')
+  const q1 = await page.$eval('.qinfo', (e) => e.textContent)
+  ok(/1\/2/.test(q1), `${label}：随机播放显示队列位置（${q1.trim()}）`)
+  const firstId = await page.evaluate(() => location.hash.match(/play\/(\d+)/)[1])
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 1, { timeout: 20000 })
+  await page.$eval('video', (v) => (v.currentTime = v.duration - 1))
+  const nextShown = await page.waitForSelector('.next-card', { timeout: 15000 }).then(() => true).catch(() => false)
+  ok(nextShown, `${label}：播完后提示队列中的下一个`)
+  await shot(page, `${label}-shuffle-next`)
+  if (nextShown) {
+    await page.click('.next-card .btn.primary')
+    const moved = await page
+      .waitForFunction((id) => location.hash.includes('/play/') && !location.hash.includes(`/play/${id}?`) && document.querySelector('.qinfo')?.textContent.includes('2/2'), { timeout: 10000 }, firstId)
+      .then(() => true)
+      .catch(() => false)
+    ok(moved, `${label}：切换到队列中的第 2 个视频`)
+  }
+}
+
 try {
   // ================= 网页模式 =================
   console.log('\n[网页模式] 浏览器内加密 + Service Worker 解密')
@@ -242,6 +337,7 @@ try {
   await sleep(1000)
   await shot(page, 'web-home-first')
   await playbackTest(page, webBase, 'web')
+  await featureTest(page, webBase, 'web')
 
   for (const [path, name] of [['/#/admin', 'admin-dashboard'], ['/#/admin/libraries', 'admin-libraries'], ['/#/admin/users', 'admin-users'], ['/#/settings', 'settings'], ['/#/history', 'history'], ['/#/library/1?view=folders', 'library-folders']]) {
     await page.goto(webBase + path, { waitUntil: 'networkidle2' })

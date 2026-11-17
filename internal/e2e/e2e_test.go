@@ -262,6 +262,108 @@ func TestFullLibrary(t *testing.T) {
 		t.Fatalf("统计不对: %+v", stats)
 	}
 
+	// ---- 筛选 ----
+	var fl struct {
+		Genre  []string `json:"genre"`
+		Actor  []string `json:"actor"`
+		Series []string `json:"series"`
+		Years  []int    `json:"years"`
+	}
+	admin.must("items.filters", map[string]any{"libraryId": 0}, &fl)
+	if len(fl.Years) == 0 || !contains(fl.Genre, "家庭") || !contains(fl.Actor, "爷爷") || !contains(fl.Series, "系列名") {
+		t.Fatalf("筛选项不对: %+v", fl)
+	}
+	for _, c := range []struct {
+		p    map[string]any
+		want int
+	}{
+		{map[string]any{"year": "2023"}, 1},
+		{map[string]any{"year": "2020-2030"}, 2}, // 2023 家庭聚会 + 2024 番号
+		{map[string]any{"genre": "家庭", "actor": "爷爷"}, 1},
+		{map[string]any{"genre": "家庭", "actor": "不存在"}, 0},
+		{map[string]any{"kind": "actor", "tag": "奶奶"}, 1}, // 旧参数仍可用
+		{map[string]any{"series": "系列名"}, 1},
+		{map[string]any{"studio": "华纳"}, 1},
+		{map[string]any{"res": "sd"}, 5},
+		{map[string]any{"res": "1080"}, 0},
+		{map[string]any{"dur": "short"}, 5},
+		{map[string]any{"dur": "long"}, 0},
+		{map[string]any{"status": "played"}, 0},
+	} {
+		var r listResult
+		c.p["libraryId"] = 0
+		admin.must("items.list", c.p, &r)
+		if r.Total != c.want {
+			t.Fatalf("筛选 %v 期望 %d 个，实际 %d", c.p, c.want, r.Total)
+		}
+	}
+
+	// 随机排序：同一个种子分页不重复不遗漏、顺序稳定
+	seen := map[int64]bool{}
+	var firstOrder []int64
+	for off := 0; off < 5; off += 2 {
+		var r listResult
+		admin.must("items.list", map[string]any{"libraryId": 0, "sort": "random", "seed": 42, "offset": off, "limit": 2}, &r)
+		if r.Total != 5 {
+			t.Fatalf("随机排序总数不对: %d", r.Total)
+		}
+		for _, it := range r.Items {
+			if seen[it.ID] {
+				t.Fatalf("随机排序分页出现重复: %d", it.ID)
+			}
+			seen[it.ID] = true
+			firstOrder = append(firstOrder, it.ID)
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("随机排序分页有遗漏: %v", seen)
+	}
+	var ids struct {
+		IDs []int64 `json:"ids"`
+	}
+	admin.must("items.ids", map[string]any{"libraryId": 0, "sort": "random", "seed": 42}, &ids)
+	if fmt.Sprint(ids.IDs) != fmt.Sprint(firstOrder) {
+		t.Fatalf("同一种子的随机队列和列表顺序不一致: %v vs %v", ids.IDs, firstOrder)
+	}
+	// 文件夹里随机播放：包含子文件夹
+	admin.must("items.ids", map[string]any{"libraryId": homeLib.ID, "browse": true, "folder": "", "sort": "random", "seed": 7}, &ids)
+	if len(ids.IDs) != 3 {
+		t.Fatalf("整个媒体库的随机队列应有 3 个: %v", ids.IDs)
+	}
+	admin.must("items.ids", map[string]any{"libraryId": homeLib.ID, "browse": true, "folder": "旅行", "sort": "random", "seed": 7}, &ids)
+	if len(ids.IDs) != 2 {
+		t.Fatalf("“旅行”文件夹的随机队列应有 2 个: %v", ids.IDs)
+	}
+
+	// 播放队列：跳过不存在的条目，取第一个可访问的作为下一个
+	var pq playResult
+	admin.must("play.open", map[string]any{"id": party.ID, "queue": []int64{999999, party.ID, sea.ID}}, &pq)
+	if pq.Next == nil || pq.Next.ID != sea.ID {
+		t.Fatalf("播放队列的下一个不对: %+v", pq.Next)
+	}
+	admin.must("play.open", map[string]any{"id": party.ID, "queue": []int64{}}, &pq)
+	if pq.Next != nil {
+		t.Fatalf("队列播完后不应再有下一个: %+v", pq.Next)
+	}
+
+	// 重看已看过的视频：记录进度、出现在继续观看、“观看中”筛选能找到
+	admin.must("items.setPlayed", map[string]any{"id": party.ID, "played": true}, nil)
+	admin.must("play.report", map[string]any{"id": party.ID, "psid": "s2", "position": 10, "duration": 24}, nil)
+	admin.must("items.get", map[string]any{"id": party.ID}, &d)
+	if !d.Played || d.Position != 10 || d.LastPlayed == 0 {
+		t.Fatalf("重看时应保留已看标记并记录进度和上次观看时间: %+v", d.card)
+	}
+	admin.must("home.get", nil, &homeData)
+	if len(homeData.Continue) != 1 || homeData.Continue[0].ID != party.ID {
+		t.Fatalf("重看到一半的视频应出现在继续观看: %+v", homeData.Continue)
+	}
+	var inprog listResult
+	admin.must("items.list", map[string]any{"libraryId": 0, "status": "inprogress"}, &inprog)
+	if inprog.Total != 1 || inprog.Items[0].ID != party.ID {
+		t.Fatalf("“观看中”筛选不对: %+v", inprog)
+	}
+	admin.must("items.setPlayed", map[string]any{"id": party.ID, "played": false}, nil)
+
 	// ---- 元数据编辑与锁定 ----
 	admin.must("items.update", map[string]any{"id": javItem.ID, "fields": []string{"title"}, "meta": map[string]any{"title": "我改的标题"}}, nil)
 	admin.must("items.rescrape", map[string]any{"id": javItem.ID, "replaceImages": false}, nil)

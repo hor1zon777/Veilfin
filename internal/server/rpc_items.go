@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ func init() {
 	register("home.get", user, rpcHome)
 	register("lib.list", user, rpcLibList)
 	register("items.list", user, rpcItemsList)
+	register("items.ids", user, rpcItemIDs)
 	register("items.get", user, rpcItemGet)
 	register("items.filters", user, rpcFilters)
 	register("items.setPlayed", user, rpcSetPlayed)
@@ -92,6 +94,7 @@ type card struct {
 	Position   float64      `json:"position"`
 	Played     bool         `json:"played"`
 	PlayCount  int          `json:"playCount"`
+	LastPlayed int64        `json:"lastPlayed"`
 }
 
 func (s *Server) cards(c *call, v *visibility, rows []*db.ItemRow) ([]*card, error) {
@@ -110,6 +113,7 @@ func (s *Server) cards(c *call, v *visibility, rows []*db.ItemRow) ([]*card, err
 			ID: r.ID, LibraryID: r.LibraryID, Title: r.Title, Year: r.Year, Code: r.Code, Duration: r.Duration,
 			Width: r.Width, Height: r.Height, AddedAt: r.AddedAt, Poster: refs[r.Poster], Thumb: refs[r.Thumb],
 			Restricted: lib != nil && lib.Restricted, Position: r.Position, Played: r.Played, PlayCount: r.PlayCount,
+			LastPlayed: r.LastPlayed,
 		})
 	}
 	return out, nil
@@ -186,21 +190,68 @@ func rpcHome(s *Server, c *call) (any, error) {
 	return map[string]any{"libraries": libs, "continue": contCards, "latest": latest, "me": s.me(c)}, nil
 }
 
-func rpcItemsList(s *Server, c *call) (any, error) {
-	var p struct {
-		LibraryID int64   `json:"libraryId"`
-		Browse    bool    `json:"browse"` // 按文件夹浏览
-		Folder    string  `json:"folder"`
-		Q         string  `json:"q"`
-		Kind      string  `json:"kind"`
-		Tag       string  `json:"tag"`
-		Played    *bool   `json:"played"`
-		Sort      string  `json:"sort"`
-		Desc      bool    `json:"desc"`
-		Offset    int     `json:"offset"`
-		Limit     int     `json:"limit"`
-		IDs       []int64 `json:"ids"`
+// listParams 是 items.list / items.ids 共用的筛选参数。
+type listParams struct {
+	LibraryID int64  `json:"libraryId"`
+	Browse    bool   `json:"browse"` // 按文件夹浏览
+	Folder    string `json:"folder"`
+	Q         string `json:"q"`
+	Kind      string `json:"kind"` // 旧参数：kind + tag 表示单个标签条件
+	Tag       string `json:"tag"`
+	Genre     string `json:"genre"`
+	Label     string `json:"label"` // “标签”类（kind=tag）
+	Actor     string `json:"actor"`
+	Studio    string `json:"studio"`
+	Series    string `json:"series"`
+	Year      string `json:"year"` // "2023" 或 "1990-1999"
+	Res       string `json:"res"`
+	Dur       string `json:"dur"`
+	Status    string `json:"status"`
+	Played    *bool  `json:"played"`
+	Sort      string `json:"sort"`
+	Desc      bool   `json:"desc"`
+	Seed      uint64 `json:"seed"`
+	Offset    int    `json:"offset"`
+	Limit     int    `json:"limit"`
+}
+
+// parseYears 解析 "2023" 或 "1990-1999"。
+func parseYears(s string) (from, to int) {
+	a, b, ok := strings.Cut(strings.TrimSpace(s), "-")
+	from, _ = strconv.Atoi(strings.TrimSpace(a))
+	to = from
+	if ok {
+		to, _ = strconv.Atoi(strings.TrimSpace(b))
 	}
+	return from, to
+}
+
+// itemQuery 把参数转换成数据库查询，并校验媒体库权限。
+func (s *Server) itemQuery(c *call, v *visibility, p *listParams) (db.ItemQuery, error) {
+	q := db.ItemQuery{UserID: c.u.ID, Q: p.Q, Studio: p.Studio, Series: p.Series, Res: p.Res, Dur: p.Dur,
+		Status: p.Status, Played: p.Played, Sort: p.Sort, Desc: p.Desc, Seed: p.Seed, Offset: p.Offset, Limit: p.Limit}
+	q.YearFrom, q.YearTo = parseYears(p.Year)
+	for _, t := range []db.TagFilter{{Kind: p.Kind, Name: p.Tag}, {Kind: "genre", Name: p.Genre}, {Kind: "tag", Name: p.Label}, {Kind: "actor", Name: p.Actor}} {
+		if t.Kind != "" && t.Name != "" {
+			q.Tags = append(q.Tags, t)
+		}
+	}
+	if p.LibraryID != 0 {
+		if _, ok := v.libs[p.LibraryID]; !ok {
+			return q, errf(api.CodeNotFound, "媒体库不存在")
+		}
+		if v.locked[p.LibraryID] {
+			return q, errf(api.CodeLocked, "受限内容，请先输入 PIN 解锁")
+		}
+		q.Libraries = []int64{p.LibraryID}
+	} else {
+		q.Libraries = v.visible
+	}
+	return q, nil
+}
+
+func rpcItemsList(s *Server, c *call) (any, error) {
+	var p listParams
 	if err := c.bind(&p); err != nil {
 		return nil, err
 	}
@@ -208,18 +259,9 @@ func rpcItemsList(s *Server, c *call) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	q := db.ItemQuery{UserID: c.u.ID, Q: p.Q, Kind: p.Kind, Tag: p.Tag, Played: p.Played, Sort: p.Sort, Desc: p.Desc,
-		Offset: p.Offset, Limit: p.Limit}
-	if p.LibraryID != 0 {
-		if _, ok := v.libs[p.LibraryID]; !ok {
-			return nil, errf(api.CodeNotFound, "媒体库不存在")
-		}
-		if v.locked[p.LibraryID] {
-			return nil, errf(api.CodeLocked, "受限内容，请先输入 PIN 解锁")
-		}
-		q.Libraries = []int64{p.LibraryID}
-	} else {
-		q.Libraries = v.visible
+	q, err := s.itemQuery(c, v, &p)
+	if err != nil {
+		return nil, err
 	}
 	var folders []db.Folder
 	if p.Browse && p.LibraryID != 0 {
@@ -240,6 +282,39 @@ func rpcItemsList(s *Server, c *call) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"items": cs, "total": total, "folders": folders}, nil
+}
+
+// rpcItemIDs 返回符合筛选条件的条目 ID 列表，用于生成播放队列（随机播放）。
+// 按文件夹浏览时包含子文件夹里的视频。
+func rpcItemIDs(s *Server, c *call) (any, error) {
+	var p listParams
+	if err := c.bind(&p); err != nil {
+		return nil, err
+	}
+	v, err := s.visibility(c)
+	if err != nil {
+		return nil, err
+	}
+	q, err := s.itemQuery(c, v, &p)
+	if err != nil {
+		return nil, err
+	}
+	if p.Browse && p.LibraryID != 0 {
+		folder := strings.Trim(p.Folder, "/")
+		q.FolderTree = &folder
+	}
+	limit := p.Limit
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	ids, err := s.DB.QueryItemIDs(c.ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []int64{}
+	}
+	return map[string]any{"ids": ids}, nil
 }
 
 type detail struct {
@@ -338,15 +413,34 @@ func rpcFilters(s *Server, c *call) (any, error) {
 		}
 		libs = []int64{p.LibraryID}
 	}
-	out := map[string][]string{}
+	out := map[string]any{}
 	for _, k := range []string{"genre", "tag", "actor"} {
-		names, err := s.DB.TopTags(c.ctx, libs, k, 60)
+		names, err := s.DB.TopTags(c.ctx, libs, k, 200)
 		if err != nil {
 			return nil, err
 		}
-		out[k] = names
+		out[k] = nonNil(names)
 	}
+	for _, col := range []string{"studio", "series"} {
+		names, err := s.DB.TopColumn(c.ctx, libs, col, 200)
+		if err != nil {
+			return nil, err
+		}
+		out[col] = nonNil(names)
+	}
+	years, err := s.DB.Years(c.ctx, libs)
+	if err != nil {
+		return nil, err
+	}
+	out["years"] = nonNil(years)
 	return out, nil
+}
+
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 func rpcSetPlayed(s *Server, c *call) (any, error) {
@@ -369,7 +463,8 @@ func rpcSetPlayed(s *Server, c *call) (any, error) {
 
 func rpcPlayOpen(s *Server, c *call) (any, error) {
 	var p struct {
-		ID int64 `json:"id"`
+		ID    int64   `json:"id"`
+		Queue []int64 `json:"queue"` // 播放队列中接下来的条目：第一个可访问的作为“下一个”
 	}
 	if err := c.bind(&p); err != nil {
 		return nil, err
@@ -427,8 +522,18 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 		trick = map[string]any{"interval": tp.Interval, "cols": tp.Cols, "rows": tp.Rows, "width": tp.Width,
 			"height": tp.Height, "count": tp.Count, "sprites": sprites}
 	}
-	// 如果当前目录还有其他视频，给出“下一个”，方便连续观看
 	var next any
+	if p.Queue != nil {
+		// 播放队列（例如随机播放）：跳过已删除或无权访问的条目
+		for _, id := range p.Queue[:min(len(p.Queue), 50)] {
+			if r, err := s.checkItem(c, v, id); err == nil && id != row.ID {
+				next = map[string]any{"id": r.ID, "title": r.Title}
+				break
+			}
+		}
+		return map[string]any{"item": d, "video": video, "subtitles": subs, "trickplay": trick, "next": next}, nil
+	}
+	// 如果当前目录还有其他视频，给出“下一个”，方便连续观看
 	folder := row.Folder
 	sib, _, err := s.DB.QueryItems(c.ctx, db.ItemQuery{UserID: c.u.ID, Libraries: []int64{row.LibraryID}, Folder: &folder, Sort: "title", Limit: 500})
 	if err == nil {

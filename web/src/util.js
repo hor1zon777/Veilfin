@@ -84,3 +84,31 @@ export function readFileBase64(file) {
     r.readAsDataURL(file)
   })
 }
+
+// 相对时间：刚刚 / 5 分钟前 / 3 小时前 / 昨天 21:30 / 4 天前 / 2026-11-01
+export function fmtAgo(ts) {
+  if (!ts) return ''
+  const diff = Date.now() / 1000 - ts
+  if (diff < 60) return '刚刚'
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  const d = new Date(ts * 1000)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  if (d >= today) return diff < 6 * 3600 ? `${Math.floor(diff / 3600)} 小时前` : `今天 ${hm}`
+  if (d >= today - 86400000) return `昨天 ${hm}`
+  const days = Math.floor((today - d) / 86400000) + 1
+  if (days < 7) return `${days} 天前`
+  return fmtDate(ts)
+}
+
+// 剩余时长（继续观看用）
+export function fmtRemain(item) {
+  const left = (item.duration || 0) - (item.position || 0)
+  if (!item.duration || left <= 0) return ''
+  return left < 60 ? '剩余不到 1 分钟' : `剩余 ${fmtDuration(left)}`
+}
+
+export function randomSeed() {
+  return crypto.getRandomValues(new Uint32Array(1))[0]
+}

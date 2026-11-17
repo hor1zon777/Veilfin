@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"math/rand/v2"
 	"sort"
 	"strings"
 )
@@ -61,17 +62,31 @@ func collectRows(rows *sql.Rows, err error) ([]*ItemRow, error) {
 }
 
 type ItemQuery struct {
-	UserID    int64
-	Libraries []int64 // 允许访问的媒体库（调用方负责权限过滤）
-	Folder    *string // 只看某个文件夹（不含子文件夹）
-	Q         string
-	Kind      string // 标签类型：genre | tag | actor
-	Tag       string
-	Played    *bool
-	Sort      string // added | title | release | duration | lastPlayed | random
-	Desc      bool
-	Offset    int
-	Limit     int
+	UserID     int64
+	Libraries  []int64 // 允许访问的媒体库（调用方负责权限过滤）
+	Folder     *string // 只看某个文件夹（不含子文件夹）
+	FolderTree *string // 某个文件夹及其所有子文件夹（"" 表示整个媒体库）
+	Q          string
+	Tags       []TagFilter // 需要同时满足的标签条件
+	Studio     string
+	Series     string
+	YearFrom   int
+	YearTo     int
+	Res        string // 4k | 1080 | 720 | sd
+	Dur        string // short | medium | long | xlong
+	Status     string // unplayed | played | inprogress
+	Played     *bool  // 旧参数，等价于 Status=played / unplayed
+	Sort       string // added | title | release | duration | rating | lastPlayed | random
+	Desc       bool
+	Seed       uint64 // 随机排序的种子：种子相同则顺序相同，分页时不会重复或遗漏
+	Offset     int
+	Limit      int
+}
+
+// TagFilter 是一个标签条件，Kind 为 genre | tag | actor。
+type TagFilter struct {
+	Kind string
+	Name string
 }
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
@@ -82,16 +97,39 @@ func prefixArg(s string) string { return likeEscaper.Replace(s) + "%" }
 // likeArg 生成“包含 s”的 LIKE 参数。
 func likeArg(s string) string { return "%" + likeEscaper.Replace(s) + "%" }
 
-// QueryItems 按条件分页查询条目，返回结果和总数。
-func (d *DB) QueryItems(ctx context.Context, q ItemQuery) ([]*ItemRow, int, error) {
-	if len(q.Libraries) == 0 {
-		return nil, 0, nil
-	}
+// 分辨率档位，和前端 resolutionLabel 的划分一致（长边或短边满足其一即可，兼容竖屏视频）
+const (
+	res4K   = "(items.width>=3800 OR MIN(items.width,items.height)>=2000)"
+	res1080 = "(items.width>=1900 OR MIN(items.width,items.height)>=1000)"
+	res720  = "(items.width>=1200 OR MIN(items.width,items.height)>=700)"
+)
+
+var resConds = map[string]string{
+	"4k":   res4K,
+	"1080": res1080 + " AND NOT " + res4K,
+	"720":  res720 + " AND NOT " + res1080,
+	"sd":   "items.width>0 AND NOT " + res720,
+}
+
+var durConds = map[string]string{
+	"short":  "items.duration>0 AND items.duration<1200",
+	"medium": "items.duration>=1200 AND items.duration<3600",
+	"long":   "items.duration>=3600 AND items.duration<7200",
+	"xlong":  "items.duration>=7200",
+}
+
+var tagKinds = map[string]bool{"genre": true, "tag": true, "actor": true}
+
+// itemsFrom 根据查询条件生成 FROM ... WHERE 子句和参数（第一个参数是用户 ID）。
+func itemsFrom(q ItemQuery) (string, []any) {
 	where := []string{"items.library_id IN (" + placeholders(len(q.Libraries)) + ")"}
 	args := int64Args(q.Libraries)
 	if q.Folder != nil {
 		where = append(where, "items.folder = ?")
 		args = append(args, *q.Folder)
+	} else if q.FolderTree != nil && *q.FolderTree != "" {
+		where = append(where, `(items.folder = ? OR items.folder LIKE ? ESCAPE '\')`)
+		args = append(args, *q.FolderTree, prefixArg(*q.FolderTree+"/"))
 	}
 	if s := strings.TrimSpace(q.Q); s != "" {
 		l := likeArg(s)
@@ -99,25 +137,55 @@ func (d *DB) QueryItems(ctx context.Context, q ItemQuery) ([]*ItemRow, int, erro
 			OR EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=items.id AND t.name LIKE ? ESCAPE '\'))`)
 		args = append(args, l, l, l, l)
 	}
-	if q.Tag != "" && q.Kind != "" {
+	for _, t := range q.Tags {
+		if !tagKinds[t.Kind] || t.Name == "" {
+			continue
+		}
 		where = append(where, "EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=items.id AND t.kind=? AND t.name=?)")
-		args = append(args, q.Kind, q.Tag)
+		args = append(args, t.Kind, t.Name)
 	}
-	if q.Played != nil {
+	if q.Studio != "" {
+		where = append(where, "items.studio = ?")
+		args = append(args, q.Studio)
+	}
+	if q.Series != "" {
+		where = append(where, "items.series = ?")
+		args = append(args, q.Series)
+	}
+	if q.YearFrom > 0 {
+		where = append(where, "items.year >= ?")
+		args = append(args, q.YearFrom)
+	}
+	if q.YearTo > 0 {
+		where = append(where, "items.year > 0 AND items.year <= ?")
+		args = append(args, q.YearTo)
+	}
+	if c := resConds[q.Res]; c != "" {
+		where = append(where, c)
+	}
+	if c := durConds[q.Dur]; c != "" {
+		where = append(where, c)
+	}
+	status := q.Status
+	if status == "" && q.Played != nil {
+		status = "unplayed"
 		if *q.Played {
-			where = append(where, "COALESCE(p.played,0)=1")
-		} else {
-			where = append(where, "COALESCE(p.played,0)=0")
+			status = "played"
 		}
 	}
-	from := " FROM items LEFT JOIN progress p ON p.item_id=items.id AND p.user_id=? WHERE " + strings.Join(where, " AND ")
-	allArgs := append([]any{q.UserID}, args...)
-
-	var total int
-	if err := d.R.QueryRowContext(ctx, "SELECT COUNT(*)"+from, allArgs...).Scan(&total); err != nil {
-		return nil, 0, err
+	switch status {
+	case "played":
+		where = append(where, "COALESCE(p.played,0)=1")
+	case "unplayed":
+		where = append(where, "COALESCE(p.played,0)=0")
+	case "inprogress":
+		where = append(where, "COALESCE(p.position,0)>0")
 	}
+	from := " FROM items LEFT JOIN progress p ON p.item_id=items.id AND p.user_id=? WHERE " + strings.Join(where, " AND ")
+	return from, append([]any{q.UserID}, args...)
+}
 
+func itemsOrder(q ItemQuery) string {
 	dir := "ASC"
 	if q.Desc {
 		dir = "DESC"
@@ -130,21 +198,102 @@ func (d *DB) QueryItems(ctx context.Context, q ItemQuery) ([]*ItemRow, int, erro
 		order = "items.release_date " + dir + ", items.year " + dir
 	case "duration":
 		order = "items.duration " + dir
+	case "rating":
+		order = "items.rating " + dir
 	case "lastPlayed":
 		order = "COALESCE(p.last_played_at,0) " + dir
-	case "random":
-		order = "RANDOM()"
 	default:
 		order = "items.added_at " + dir
 	}
-	order += ", items.id " + dir
+	return order + ", items.id " + dir
+}
+
+func scanIDs(rows *sql.Rows, err error) ([]int64, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// shuffledIDs 取出所有符合条件的条目 ID，并按种子打乱。
+func (d *DB) shuffledIDs(ctx context.Context, from string, args []any, seed uint64) ([]int64, error) {
+	ids, err := scanIDs(d.R.QueryContext(ctx, "SELECT items.id"+from+" ORDER BY items.id", args...))
+	if err != nil {
+		return nil, err
+	}
+	r := rand.New(rand.NewPCG(seed, 0x5eed))
+	r.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+	return ids, nil
+}
+
+// QueryItems 按条件分页查询条目，返回结果和总数。
+func (d *DB) QueryItems(ctx context.Context, q ItemQuery) ([]*ItemRow, int, error) {
+	if len(q.Libraries) == 0 {
+		return nil, 0, nil
+	}
+	from, args := itemsFrom(q)
 	limit := q.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 60
 	}
-	allArgs = append(allArgs, limit, max(q.Offset, 0))
-	rows, err := collectRows(d.R.QueryContext(ctx, "SELECT "+qualifiedItemCols+","+progressCols+from+" ORDER BY "+order+" LIMIT ? OFFSET ?", allArgs...))
+	offset := max(q.Offset, 0)
+
+	if q.Sort == "random" {
+		ids, err := d.shuffledIDs(ctx, from, args, q.Seed)
+		if err != nil {
+			return nil, 0, err
+		}
+		total := len(ids)
+		if offset >= total {
+			return nil, total, nil
+		}
+		page := ids[offset:min(offset+limit, total)]
+		rows, err := collectRows(d.R.QueryContext(ctx, "SELECT "+qualifiedItemCols+","+progressCols+
+			" FROM items LEFT JOIN progress p ON p.item_id=items.id AND p.user_id=? WHERE items.id IN ("+placeholders(len(page))+")",
+			append([]any{q.UserID}, int64Args(page)...)...))
+		if err != nil {
+			return nil, 0, err
+		}
+		pos := make(map[int64]int, len(page))
+		for i, id := range page {
+			pos[id] = i
+		}
+		sort.Slice(rows, func(i, j int) bool { return pos[rows[i].ID] < pos[rows[j].ID] })
+		return rows, total, nil
+	}
+
+	var total int
+	if err := d.R.QueryRowContext(ctx, "SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
+	rows, err := collectRows(d.R.QueryContext(ctx, "SELECT "+qualifiedItemCols+","+progressCols+from+" ORDER BY "+itemsOrder(q)+" LIMIT ? OFFSET ?", args...))
 	return rows, total, err
+}
+
+// QueryItemIDs 只返回符合条件的条目 ID（用于“随机播放”等播放队列），最多 limit 个。
+func (d *DB) QueryItemIDs(ctx context.Context, q ItemQuery, limit int) ([]int64, error) {
+	if len(q.Libraries) == 0 {
+		return nil, nil
+	}
+	from, args := itemsFrom(q)
+	if q.Sort == "random" {
+		ids, err := d.shuffledIDs(ctx, from, args, q.Seed)
+		if len(ids) > limit {
+			ids = ids[:limit]
+		}
+		return ids, err
+	}
+	return scanIDs(d.R.QueryContext(ctx, "SELECT items.id"+from+" ORDER BY "+itemsOrder(q)+" LIMIT ?", append(args, limit)...))
 }
 
 // ItemRowByID 返回条目和该用户的观看进度。
@@ -287,7 +436,7 @@ func (d *DB) ContinueWatching(ctx context.Context, uid int64, libs []int64, limi
 	args = append(args, resumeRatio, limit)
 	return collectRows(d.R.QueryContext(ctx, "SELECT "+qualifiedItemCols+","+progressCols+
 		` FROM progress p JOIN items ON items.id=p.item_id WHERE p.user_id=? AND items.library_id IN (`+placeholders(len(libs))+`)
-		AND p.played=0 AND p.position > 0 AND (items.duration=0 OR p.position >= items.duration*?)
+		AND p.position > 0 AND (items.duration=0 OR p.position >= items.duration*?)
 		ORDER BY p.last_played_at DESC LIMIT ?`, args...))
 }
 

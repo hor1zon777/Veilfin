@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { rpc, beacon, toastError } from '../store.js'
 import { fmtTime, randomId } from '../util.js'
+import { queueAt } from '../queue.js'
 import Icon from '../components/Icon.vue'
 
 const props = defineProps({ id: String })
@@ -32,6 +33,9 @@ const ended = ref(false)
 const countdown = ref(0)
 const flash = ref('') // 快捷键提示
 const bubble = ref(null) // 中央反馈气泡 { icon, key }
+const queue = ref(null) // 播放队列（随机播放）中的位置 { label, index, total, rest }
+const resumed = ref(0) // 自动续播的起点（秒），用于显示“从头播放”提示
+let resumeTimer = null
 let bubbleSeq = 0
 function showBubble(icon, text) {
   bubble.value = { icon, text, key: ++bubbleSeq }
@@ -50,7 +54,10 @@ const trick = computed(() => data.value?.trickplay)
 
 async function load() {
   try {
-    data.value = await rpc('play.open', { id: Number(props.id) })
+    queue.value = route.query.queue ? queueAt(props.id) : null
+    const p = { id: Number(props.id) }
+    if (queue.value) p.queue = queue.value.rest
+    data.value = await rpc('play.open', p)
     document.title = data.value.item.title
     const d = data.value.item.duration
     if (d) dur.value = d
@@ -65,8 +72,18 @@ function onLoaded() {
   v.volume = volume.value
   v.muted = muted.value
   if (isFinite(v.duration)) dur.value = v.duration
-  const t = Number(route.query.t)
-  if (t > 0 && t < v.duration - 5) v.currentTime = t
+  // 起点：链接里指定了 t（包括 t=0 表示从头播放）就用它，否则从上次看到的位置继续
+  const it = data.value.item
+  const auto = route.query.t === undefined
+  const t = auto ? it.position || 0 : Number(route.query.t) || 0
+  if (t > 0 && t < v.duration - 5) {
+    v.currentTime = t
+    if (auto) {
+      resumed.value = t
+      clearTimeout(resumeTimer)
+      resumeTimer = setTimeout(() => (resumed.value = 0), 7000)
+    }
+  }
   v.play().catch(() => {
     // 浏览器禁止有声自动播放时，静音后再试
     v.muted = true
@@ -123,6 +140,13 @@ function onEnded() {
 function onError() {
   const code = video.value?.error?.code
   err.value = code === 4 ? '浏览器不支持这个视频的格式或编码（例如 HEVC），无法播放' : '播放出错：视频数据加载失败或校验未通过'
+}
+
+function restart() {
+  resumed.value = 0
+  seek(0)
+  video.value?.play().catch(() => {})
+  showBubble('replay', '从头播放')
 }
 
 function toggle() {
@@ -301,7 +325,7 @@ function back() {
 }
 function playNext() {
   clearInterval(countdownTimer)
-  if (data.value?.next) router.replace(`/play/${data.value.next.id}`)
+  if (data.value?.next) router.replace({ path: `/play/${data.value.next.id}`, query: queue.value ? { queue: '1' } : {} })
 }
 function cancelNext() {
   clearInterval(countdownTimer)
@@ -326,6 +350,7 @@ onBeforeUnmount(() => {
   clearInterval(reportTimer)
   clearInterval(countdownTimer)
   clearTimeout(hideTimer)
+  clearTimeout(resumeTimer)
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
   document.title = 'Veilfin'
 })
@@ -375,7 +400,7 @@ watch(menu, (m) => m && (showUI.value = true))
 
     <Transition name="slide-up">
     <div v-if="ended && data?.next && countdown > 0" class="next-card">
-      <div class="muted">即将播放下一个（{{ countdown }}）</div>
+      <div class="muted">{{ queue ? '随机播放 · 下一个' : '即将播放下一个' }}（{{ countdown }}）</div>
       <div class="next-title">{{ data.next.title }}</div>
       <div class="row">
         <button class="btn primary" @click="playNext"><Icon name="play" /> 立即播放</button>
@@ -385,12 +410,21 @@ watch(menu, (m) => m && (showUI.value = true))
     </div>
     </Transition>
 
+    <Transition name="slide-up">
+    <div v-if="resumed && !err && !ended" class="resume-chip">
+      <span>已从 {{ fmtTime(resumed) }} 继续播放</span>
+      <button class="btn" @click.stop="restart"><Icon name="replay" :size="18" /> 从头播放</button>
+    </div>
+    </Transition>
+
     <div class="top ui">
       <button class="icon-btn" title="返回 (Esc)" @click="back"><Icon name="back" /></button>
       <div class="ptitle">
         <div>{{ data?.item.title }}</div>
         <div v-if="data?.item.code && data.item.code !== data.item.title" class="muted small">{{ data.item.code }}</div>
       </div>
+      <div class="spacer" />
+      <div v-if="queue" class="qinfo" :title="queue.label"><Icon name="shuffle" :size="16" /> {{ queue.label }} · {{ queue.index + 1 }}/{{ queue.total }}</div>
     </div>
 
     <div class="bottom ui" @click.stop>
@@ -504,5 +538,11 @@ video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .next-card { position: absolute; right: 30px; bottom: 120px; z-index: 3; background: rgba(30,30,30,.72); padding: 18px 20px; border-radius: 16px; display: grid; gap: 10px;
   max-width: 360px; backdrop-filter: saturate(180%) blur(24px); -webkit-backdrop-filter: saturate(180%) blur(24px); box-shadow: 0 20px 50px rgba(0,0,0,.5); }
 .next-title { font-size: 17px; }
+.resume-chip { position: absolute; left: 22px; bottom: 120px; z-index: 3; display: flex; align-items: center; gap: 14px; padding: 8px 8px 8px 18px;
+  border-radius: 999px; background: rgba(30,30,30,.66); box-shadow: 0 12px 36px rgba(0,0,0,.45);
+  backdrop-filter: saturate(180%) blur(24px); -webkit-backdrop-filter: saturate(180%) blur(24px); }
+.resume-chip .btn { border-radius: 999px; height: 32px; padding: 0 14px; }
+.qinfo { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; color: #ddd; max-width: 40vw;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: rgba(255,255,255,.1); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
 @media (max-width: 600px) { .vol input { display: none; } .bottom { padding: 30px 10px 8px; } }
 </style>

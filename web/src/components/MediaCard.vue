@@ -10,6 +10,7 @@ const props = defineProps({
   subtitle: { type: String, default: '' },
   showProgress: { type: Boolean, default: true },
   index: { type: Number, default: 0 }, // 用于依次出现的延迟
+  to: { type: [String, Object], default: '' }, // 点击后去哪里，默认是详情页
 })
 
 const loaded = ref(false)
@@ -19,7 +20,7 @@ const img = computed(() => {
 })
 const pct = computed(() => {
   const it = props.item
-  if (!it.position || !it.duration || it.played) return 0
+  if (!it.position || !it.duration) return 0
   return Math.min(100, (it.position / it.duration) * 100)
 })
 const blur = computed(() => props.item.restricted && state.me?.blurRestricted)
@@ -37,7 +38,7 @@ const delay = computed(() => ({ '--i': Math.min(props.index % 60, 14) }))
 </script>
 
 <template>
-  <router-link :to="`/item/${item.id}`" class="card rise" :class="shape" :style="delay">
+  <router-link :to="to || `/item/${item.id}`" class="card rise" :class="shape" :style="delay">
     <div class="frame" :style="img ? null : placeholderStyle(item.id)">
       <img v-if="img" :src="img" loading="lazy" decoding="async" alt="" class="lazy-img" :class="{ blur, loaded }" @load="loaded = true" />
       <div v-else class="ph-title">{{ item.title }}</div>

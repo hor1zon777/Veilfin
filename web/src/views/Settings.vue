@@ -8,8 +8,12 @@ const conn = ref(null)
 const pw = ref({ old: '', new1: '', new2: '' })
 const pin = ref({ password: '', pin: '' })
 const busy = ref(false)
+const serverVersion = ref('')
 
 onMounted(async () => {
+  rpc('sys.info')
+    .then((i) => (serverVersion.value = i.version))
+    .catch(() => {})
   try {
     conn.value = await connectionStatus()
   } catch {}
@@ -104,10 +108,25 @@ async function setBlur(v) {
         <span><kbd>F</kbd> 全屏</span>
         <span><kbd>M</kbd> 静音</span>
         <span><kbd>C</kbd> 切换字幕</span>
+        <span><kbd>R</kbd> 顺时针旋转画面（Shift+R 逆时针）</span>
         <span><kbd>0</kbd>–<kbd>9</kbd> 跳到 0%–90%</span>
         <span><kbd>Esc</kbd> 退出播放</span>
       </div>
     </section>
+    <section class="card-panel d5">
+      <h2>关于</h2>
+      <div class="kv">
+        <span>服务端版本</span><span class="ver">{{ serverVersion || '…' }}</span>
+        <template v-if="conn?.mode === 'local'">
+          <span>客户端版本</span><span class="ver">{{ conn.version || '…' }}</span>
+        </template>
+      </div>
+      <p v-if="conn?.mode === 'local' && conn.version && serverVersion && conn.version !== serverVersion" class="warn">
+        本地客户端和服务端的版本不一致，建议把两边更新到同一版本。
+      </p>
+      <p class="hint">{{ conn?.mode === 'local' ? '网页界面由本地客户端提供，和客户端版本一致。' : '网页界面内置在服务端程序里，和服务端版本一致。' }}</p>
+    </section>
+
     <p class="muted foot"><Icon name="shield" :size="14" /> 所有请求、响应、视频和图片都经过端到端加密。</p>
   </div>
 </template>
@@ -118,6 +137,7 @@ section { margin-bottom: 18px; }
 h2 { font-size: 17px; margin-bottom: 14px; }
 .kv { display: grid; grid-template-columns: 90px 1fr; gap: 8px 14px; font-size: 13.5px; margin-bottom: 10px; }
 .kv > span:nth-child(odd) { color: var(--muted); }
+.ver { font-family: Consolas, ui-monospace, monospace; font-size: 13px; }
 .kv code { font-size: 13px; color: var(--accent); }
 .warn { color: var(--warn); }
 .w { width: 220px; }

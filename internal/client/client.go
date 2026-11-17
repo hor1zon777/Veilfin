@@ -35,6 +35,7 @@ type Config struct {
 	Server    string // 服务端地址（通常是 CDN 域名）
 	DataDir   string
 	ServerKey string // 服务端身份公钥（base64），留空则首次连接时信任并记住
+	Version   string // 本地客户端程序的版本，显示在设置页
 }
 
 type Client struct {
@@ -340,6 +341,7 @@ func (c *Client) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"warning":     c.Warning,
 		"connected":   err == nil,
 		"authed":      b.tr.isAuthed(),
+		"version":     c.cfg.Version,
 	}
 	if err != nil {
 		st["error"] = err.Error()

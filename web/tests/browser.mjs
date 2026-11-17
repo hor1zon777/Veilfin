@@ -313,6 +313,30 @@ async function featureTest(page, base, label) {
       .catch(() => false)
     ok(moved, `${label}：切换到队列中的第 2 个视频`)
   }
+
+  // 旋转画面：R 顺时针 90°，宽高对调铺满屏幕；按视频记住角度，Shift+R 转回去
+  const rotState = () =>
+    page.$eval('video', (v) => ({
+      sideways: v.classList.contains('sideways'),
+      fit: Math.abs(v.offsetWidth - innerHeight) < 2 && Math.abs(v.offsetHeight - innerWidth) < 2,
+      rot: getComputedStyle(v).getPropertyValue('--rot').trim(),
+    }))
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 1, { timeout: 20000 })
+  await page.keyboard.press('r')
+  await sleep(900)
+  let rs = await rotState()
+  ok(rs.sideways && rs.fit && rs.rot === '90deg', `${label}：按 R 旋转 90° 后画面宽高对调（${JSON.stringify(rs)}）`)
+  await shot(page, `${label}-rotated`)
+  await page.reload({ waitUntil: 'networkidle2' })
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 1, { timeout: 20000 })
+  rs = await rotState()
+  ok(rs.sideways && rs.rot === '90deg', `${label}：刷新后保持该视频的旋转角度`)
+  await page.keyboard.down('Shift')
+  await page.keyboard.press('R')
+  await page.keyboard.up('Shift')
+  await sleep(900)
+  rs = await rotState()
+  ok(!rs.sideways && rs.rot === '0deg', `${label}：Shift+R 逆时针转回原始方向`)
 }
 
 try {
@@ -346,6 +370,9 @@ try {
     if (name === 'settings') {
       const conn = await page.$eval('.kv', (e) => e.textContent).catch(() => '')
       ok(conn.includes('ML-KEM-768'), '网页模式：设置页显示后量子加密套件')
+      await page.waitForFunction(() => document.querySelector('.ver')?.textContent.startsWith('dev'), { timeout: 5000 }).catch(() => {})
+      const vers = await page.$$eval('.ver', (v) => v.map((x) => x.textContent))
+      ok(vers.length === 1 && /^dev \([0-9a-f]{7}/.test(vers[0]), `网页模式：设置页显示服务端版本号（${vers.join(' / ')}）`)
     }
   }
   const webErrors = page.errors.filter((e) => !e.includes('favicon'))
@@ -446,6 +473,11 @@ try {
   ok(true, '本地模式：登录成功')
   ok(await lp.evaluate(() => !navigator.serviceWorker.controller), '本地模式：不使用 Service Worker（由 Go 客户端解密）')
   await playbackTest(lp, localBase, 'local')
+  await lp.goto(localBase + '/#/settings', { waitUntil: 'networkidle2' })
+  await lp.waitForFunction(() => [...document.querySelectorAll('.ver')].filter((v) => v.textContent.startsWith('dev')).length === 2, { timeout: 8000 }).catch(() => {})
+  const lvers = await lp.$$eval('.ver', (v) => v.map((x) => x.textContent))
+  ok(lvers.length === 2 && lvers.every((v) => v.startsWith('dev')) && !(await lp.$('.settings .warn')), `本地模式：设置页显示服务端和客户端版本号（${lvers.join(' / ')}）`)
+  await shot(lp, 'local-settings')
   const localErrors = lp.errors.filter((e) => !e.includes('favicon'))
   ok(localErrors.length === 0, '本地模式：没有控制台错误 / CSP 违规' + (localErrors.length ? '\n      ' + localErrors.join('\n      ') : ''))
 } catch (e) {

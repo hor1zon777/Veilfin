@@ -42,6 +42,35 @@ import (
 // version 在发布构建时通过 -ldflags "-X main.version=..." 注入。
 var version = "dev"
 
+func init() { version = describeVersion(version) }
+
+// describeVersion 在版本号后面附上编译时的 git 提交（Go 自动写入程序），
+// 例如 "20261117 (7ea7177)"、"dev (7ea7177, 有未提交的修改)"，方便确认运行的是哪次构建。
+func describeVersion(v string) string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return v
+	}
+	var rev string
+	var dirty bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) < 7 {
+		return v
+	}
+	extra := rev[:7]
+	if dirty {
+		extra += ", 有未提交的修改"
+	}
+	return v + " (" + extra + ")"
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `Veilfin `+version+`
 
@@ -184,7 +213,7 @@ func runClient(args []string) error {
 	debug.SetMemoryLimit(160 << 20)
 	ctx, cancel := signalContext()
 	defer cancel()
-	cli, err := client.New(ctx, client.Config{Server: *srvURL, DataDir: *data, ServerKey: *key})
+	cli, err := client.New(ctx, client.Config{Server: *srvURL, DataDir: *data, ServerKey: *key, Version: version})
 	if err != nil {
 		return err
 	}
@@ -205,7 +234,7 @@ func runClient(args []string) error {
 	}()
 	port := ln.Addr().(*net.TCPAddr).Port
 	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
-	log.Printf("本地客户端已启动：%s", url)
+	log.Printf("本地客户端已启动：%s（Veilfin %s）", url, version)
 	if host, _, _ := net.SplitHostPort(*listen); host == "" || net.ParseIP(host).IsUnspecified() {
 		for _, ip := range lanIPs() {
 			log.Printf("局域网访问：http://%s/", net.JoinHostPort(ip, fmt.Sprint(port)))

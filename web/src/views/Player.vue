@@ -35,6 +35,11 @@ const flash = ref('') // 快捷键提示
 const bubble = ref(null) // 中央反馈气泡 { icon, key }
 const queue = ref(null) // 播放队列（随机播放）中的位置 { label, index, total, rest }
 const resumed = ref(0) // 自动续播的起点（秒），用于显示“从头播放”提示
+// 画面旋转角度：一直累加（可以超过 360°），这样每次都朝同一方向转，动画不会倒着绕回去。
+// 按视频记在本机，竖拍 / 方向录错的视频转一次以后都保持。
+const ROT_KEY = `vf.rot.${props.id}`
+const rot = ref(Number(localStorage.getItem(ROT_KEY)) || 0)
+const sideways = computed(() => Math.abs(rot.value / 90) % 2 === 1)
 let resumeTimer = null
 let bubbleSeq = 0
 function showBubble(icon, text) {
@@ -140,6 +145,14 @@ function onEnded() {
 function onError() {
   const code = video.value?.error?.code
   err.value = code === 4 ? '浏览器不支持这个视频的格式或编码（例如 HEVC），无法播放' : '播放出错：视频数据加载失败或校验未通过'
+}
+
+function rotate(dir = 1) {
+  rot.value += dir * 90
+  const norm = ((rot.value % 360) + 360) % 360
+  if (norm) localStorage.setItem(ROT_KEY, norm)
+  else localStorage.removeItem(ROT_KEY)
+  showFlash(norm ? `旋转 ${norm}°` : '恢复原始方向')
 }
 
 function restart() {
@@ -303,6 +316,10 @@ function onKey(e) {
     case 'f':
       toggleFullscreen()
       break
+    case 'r':
+    case 'R':
+      rotate(e.shiftKey ? -1 : 1)
+      break
     case 'c':
       if (data.value?.subtitles.length) setSub(subIndex.value + 1 >= data.value.subtitles.length ? -1 : subIndex.value + 1)
       break
@@ -362,6 +379,8 @@ watch(menu, (m) => m && (showUI.value = true))
     <video
       v-if="data"
       ref="video"
+      :class="{ sideways }"
+      :style="{ '--rot': rot + 'deg' }"
       :src="data.video"
       playsinline
       preload="auto"
@@ -468,6 +487,9 @@ watch(menu, (m) => m && (showUI.value = true))
             <button v-for="r in [0.5, 0.75, 1, 1.25, 1.5, 2]" :key="r" :class="{ sel: rate === r }" @click="setRate(r)">{{ r }}×</button>
           </div></Transition>
         </div>
+        <button class="icon-btn" :class="{ on: rot % 360 !== 0 }" title="旋转画面 (R，Shift+R 逆时针)" @click="rotate(1)">
+          <Icon name="rotate" class="rot-icon" :style="{ '--rot': rot + 'deg' }" />
+        </button>
         <button class="icon-btn" title="全屏 (F)" @click="toggleFullscreen"><Icon :name="fullscreen ? 'exitFullscreen' : 'fullscreen'" /></button>
       </div>
     </div>
@@ -477,7 +499,12 @@ watch(menu, (m) => m && (showUI.value = true))
 <style scoped>
 .player { position: fixed; inset: 0; background: #000; overflow: hidden; user-select: none; }
 .player.hide-ui { cursor: none; }
-video { width: 100%; height: 100%; display: block; background: #000; }
+/* 视频始终居中；横躺（90° / 270°）时宽高对调，旋转后正好铺满屏幕。宽高和角度一起按弹簧曲线过渡 */
+video { position: absolute; left: 50%; top: 50%; width: 100vw; height: 100vh; height: 100dvh; display: block; background: #000;
+  transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
+  transition: transform .6s var(--spring), width .6s var(--spring), height .6s var(--spring); }
+video.sideways { width: 100vh; width: 100dvh; height: 100vw; }
+.rot-icon { transform: rotate(var(--rot, 0deg)); transition: transform .6s var(--spring-bouncy); }
 video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .ui { position: absolute; left: 0; right: 0; transition: opacity .45s var(--ease-out), transform .6s var(--spring); z-index: 2; }
 .hide-ui .ui { opacity: 0; pointer-events: none; }

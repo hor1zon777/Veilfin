@@ -65,6 +65,7 @@ type meResult struct {
 	UnlockedUntil  int64  `json:"unlockedUntil"`
 	BlurRestricted bool   `json:"blurRestricted"`
 	ServerName     string `json:"serverName"`
+	KeepPageTitle  bool   `json:"keepPageTitle"`
 }
 
 func (s *Server) me(c *call) *meResult {
@@ -73,7 +74,9 @@ func (s *Server) me(c *call) *meResult {
 	c.ss.mu.Unlock()
 	unlocked := c.u.PinHash == "" || s.now().Before(until)
 	r := &meResult{ID: c.u.ID, Username: c.u.Username, IsAdmin: c.u.IsAdmin, HasPin: c.u.PinHash != "",
-		Unlocked: unlocked, BlurRestricted: c.u.BlurRestricted, ServerName: s.Lib.Settings(c.ctx).ServerName}
+		Unlocked: unlocked, BlurRestricted: c.u.BlurRestricted}
+	st := s.Lib.Settings(c.ctx)
+	r.ServerName, r.KeepPageTitle = st.ServerName, st.KeepPageTitle
 	if c.u.PinHash != "" && unlocked {
 		r.UnlockedUntil = until.Unix()
 	}

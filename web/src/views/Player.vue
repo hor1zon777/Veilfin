@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { rpc, beacon, toastError } from '../store.js'
+import { state, rpc, beacon, toastError } from '../store.js'
 import { fmtTime, randomId } from '../util.js'
 import { queueAt } from '../queue.js'
 import Icon from '../components/Icon.vue'
@@ -49,6 +49,7 @@ function showBubble(icon, text) {
 }
 
 const psid = randomId()
+const prevTitle = document.title // 离开播放页时恢复
 let hideTimer = null
 let reportTimer = null
 let countdownTimer = null
@@ -63,7 +64,8 @@ async function load() {
     const p = { id: Number(props.id) }
     if (queue.value) p.queue = queue.value.rest
     data.value = await rpc('play.open', p)
-    document.title = data.value.item.title
+    // 管理后台可以设置播放时不把标签页标题改成视频名称
+    if (!state.me?.keepPageTitle) document.title = data.value.item.title
     const d = data.value.item.duration
     if (d) dur.value = d
   } catch (e) {
@@ -369,7 +371,7 @@ onBeforeUnmount(() => {
   clearTimeout(hideTimer)
   clearTimeout(resumeTimer)
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
-  document.title = 'Veilfin'
+  document.title = prevTitle
 })
 watch(menu, (m) => m && (showUI.value = true))
 </script>

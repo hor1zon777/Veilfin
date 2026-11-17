@@ -48,6 +48,8 @@ type Settings struct {
 	ScanIntervalHours int    `json:"scanIntervalHours"`
 	WatchEnabled      bool   `json:"watchEnabled"`
 	TrickplayEnabled  bool   `json:"trickplayEnabled"`
+	// KeepPageTitle 为真时，播放视频不会把浏览器标签页标题改成视频名称
+	KeepPageTitle bool `json:"keepPageTitle"`
 }
 
 func DefaultSettings() Settings {

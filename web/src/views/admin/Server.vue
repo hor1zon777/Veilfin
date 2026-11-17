@@ -37,6 +37,7 @@ async function save() {
   try {
     s.value = await rpc('admin.settings.set', { ...s.value, scanIntervalHours: Number(s.value.scanIntervalHours) || 0 })
     state.serverName = s.value.serverName
+    if (state.me) state.me.keepPageTitle = s.value.keepPageTitle
     toast('设置已保存', 'ok')
   } catch (e) {
     toastError(e)
@@ -76,6 +77,7 @@ async function save() {
         </div>
         <label class="check"><input v-model="s.watchEnabled" type="checkbox" /> 监听目录变化，自动扫描新增 / 删除的文件</label>
         <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（只解码关键帧，3 小时视频约需几十秒）</label>
+        <label class="check"><input v-model="s.keepPageTitle" type="checkbox" /> 播放视频时网页标题保持不变（不显示正在播放的视频名称）</label>
         <p v-if="ffmpegInfo" class="hint ff">正在使用：{{ ffmpegInfo }}</p>
       </section>
 

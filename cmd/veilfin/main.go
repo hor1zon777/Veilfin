@@ -140,7 +140,8 @@ func runServer(args []string) error {
 	listen := fs.String("listen", envOr("VF_LISTEN", "0.0.0.0:8097"), "监听地址（环境变量 VF_LISTEN）")
 	data := fs.String("data", envOr("VF_DATA", "./data"), "数据目录，存放密钥和数据库，务必备份（VF_DATA）")
 	media := fs.String("media", os.Getenv("VF_MEDIA"), "可选：首次初始化时自动创建指向该目录的媒体库（VF_MEDIA）")
-	web := fs.Bool("web", envOr("VF_WEB", "") == "1", "同时提供网页模式（手机等无法运行客户端的设备使用，VF_WEB=1）")
+	webEnv := strings.ToLower(os.Getenv("VF_WEB"))
+	web := fs.Bool("web", webEnv != "0" && webEnv != "false", "提供网页模式（浏览器直接访问，手机等无法运行客户端的设备使用），默认开启；-web=false 或 VF_WEB=0 关闭")
 	apiBase := fs.String("api-base", os.Getenv("VF_API_BASE"), "网页模式下前端访问 API 的地址（前端与 API 分开部署时填写）")
 	webOrigin := fs.String("web-origin", os.Getenv("VF_WEB_ORIGIN"), "允许跨域访问 API 的前端地址（前端与 API 分开部署时填写）")
 	ffdir := fs.String("ffmpeg", os.Getenv("VF_FFMPEG"), "ffmpeg / ffprobe 所在目录，默认在 PATH 中查找，找不到时使用内置版本（如有）")
@@ -204,12 +205,24 @@ func serveOnce(parent context.Context, cfg server.Config, listen, tlsCert, tlsKe
 		log.Printf("服务端公钥: %s", base64.StdEncoding.EncodeToString(pub))
 		log.Printf("公钥指纹:   %s", proto.Fingerprint(pub))
 	}
+	localURL := localServerURL(listen, tlsCert != "")
+	clientCmd := fmt.Sprintf("%s client -server %s -server-key '%s'", filepath.Base(os.Args[0]), localURL, base64.StdEncoding.EncodeToString(pub))
 	if srv.NeedsSetup() {
-		log.Printf("★ 尚未初始化：请在 %d 分钟内用浏览器打开本服务，按设置向导创建管理员（超时后重启服务端即可重新计时）",
-			int(server.DefaultSetupWindow.Minutes()))
+		mins := int(server.DefaultSetupWindow.Minutes())
+		if cfg.Web {
+			log.Printf("★ 尚未初始化：请在 %d 分钟内用浏览器打开 %s ，按设置向导创建管理员（超时后重启服务端即可重新计时）", mins, localURL)
+		} else {
+			log.Printf("★ 尚未初始化：请在 %d 分钟内用本地客户端连接本服务，在打开的页面里按设置向导创建管理员（超时后重启服务端即可重新计时）：", mins)
+			log.Printf("    %s", clientCmd)
+			log.Printf("  也可以去掉 -web=false（或 VF_WEB=0）重新启动，直接用浏览器打开 %s", localURL)
+		}
 	}
-	if cfg.Web && first {
-		log.Printf("网页模式已开启")
+	if first {
+		if cfg.Web {
+			log.Printf("网页模式已开启：浏览器打开 %s（网页模式需要 HTTPS，本机的 localhost / 127.0.0.1 除外）", localURL)
+		} else if !srv.NeedsSetup() {
+			log.Printf("网页模式已关闭（-web=false 或 VF_WEB=0），浏览器直接访问本端口会返回 404，请用本地客户端连接")
+		}
 	}
 	go srv.Run(ctx)
 
@@ -297,6 +310,22 @@ func runClient(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// localServerURL 返回在本机访问服务端的地址，用于启动提示。
+func localServerURL(listen string, tls bool) string {
+	scheme := "http"
+	if tls {
+		scheme = "https"
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return scheme + "://" + listen
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
 // lanIPs 列出本机的局域网 IPv4 地址，用于提示其他设备如何访问。

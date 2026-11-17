@@ -57,7 +57,7 @@ docker compose logs veilfin     # 记下“服务端公钥”和“公钥指纹�
 或者直接运行。Release 里的 `veilfin-server-full-*`（Linux x64 / ARM64、Windows x64）内置了精简编译的 ffmpeg，下载即可运行；普通版需要先安装 ffmpeg：
 
 ```bash
-./veilfin-server-full-linux-amd64 server -media /path/to/videos -web
+./veilfin-server-full-linux-amd64 server -media /path/to/videos
 ```
 
 查找 ffmpeg 的顺序是：`-ffmpeg` 参数 → 系统里已安装的（PATH）→ 内置版本。只有系统里找不到时，内置的 ffmpeg 才会解压到数据目录的 `bin/` 下使用（数据目录所在分区不能禁止执行程序）。
@@ -87,7 +87,7 @@ veilfin client -server https://你的CDN域名 -server-key '服务端公钥'
 
 ### 3. 网页模式（手机上看）
 
-服务端加了 `-web` 后，直接在手机浏览器打开 `https://你的域名`。要求：
+网页模式默认开启，直接在手机浏览器打开 `https://你的域名` 即可（只想用本地客户端时，可以用 `-web=false` 或 `VF_WEB=0` 关闭）。要求：
 
 - 必须是 HTTPS。Service Worker 和 WebCrypto 只能在安全上下文中使用
 - Firefox 的隐私模式用不了，因为它禁用了 Service Worker
@@ -95,7 +95,7 @@ veilfin client -server https://你的CDN域名 -server-key '服务端公钥'
 **强隔离部署**：前端页面走一个不经过 CDN 的子域名（DNS 直接指向源站），API 和视频走 CDN。这样 CDN 就没有机会篡改前端代码：
 
 ```bash
-veilfin server -web -api-base https://cdn.example.com -web-origin https://app.example.com
+veilfin server -api-base https://cdn.example.com -web-origin https://app.example.com
 ```
 
 ### 4. 添加媒体库
@@ -119,7 +119,7 @@ veilfin server -web -api-base https://cdn.example.com -web-origin https://app.ex
 ## 命令
 
 ```
-veilfin server   [-listen 0.0.0.0:8097] [-data ./data] [-media 目录] [-web] [-api-base URL] [-web-origin URL] [-ffmpeg 目录] [-tls-cert/-tls-key]
+veilfin server   [-listen 0.0.0.0:8097] [-data ./data] [-media 目录] [-web=false] [-api-base URL] [-web-origin URL] [-ffmpeg 目录] [-tls-cert/-tls-key]
 veilfin client   -server URL [-server-key 公钥] [-listen 0.0.0.0:8096] [-open=false]
 veilfin keyinfo  [-data ./data]                      显示服务端公钥和指纹
 veilfin backup   [-data ./data] [-out 文件] [-no-assets]   加密备份（口令用 Argon2id 派生，XChaCha20-Poly1305 加密）
@@ -127,7 +127,7 @@ veilfin restore  -in 文件 [-data ./data] [-force]     恢复（先停止服务
 veilfin user reset-password -name 用户名 [-data ./data]   忘记密码时重置
 ```
 
-服务端的选项都可以用环境变量设置：`VF_LISTEN`、`VF_DATA`、`VF_MEDIA`、`VF_WEB=1`、`VF_API_BASE`、`VF_WEB_ORIGIN`、`VF_FFMPEG`。
+服务端的选项都可以用环境变量设置：`VF_LISTEN`、`VF_DATA`、`VF_MEDIA`、`VF_WEB=0`（关闭网页模式）、`VF_API_BASE`、`VF_WEB_ORIGIN`、`VF_FFMPEG`。
 
 ## 构建
 

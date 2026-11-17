@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"veilfin/internal/auth"
 	"veilfin/internal/db"
 	"veilfin/internal/mediacrypt"
+	"veilfin/internal/proto"
 )
 
 func init() {
@@ -86,6 +88,9 @@ func rpcSysInfo(s *Server, c *call) (any, error) {
 		"serverName":     s.Lib.Settings(c.ctx).ServerName,
 		"version":        s.cfg.Version,
 		"loggedIn":       c.u != nil,
+		// 服务端身份公钥本来就是公开的（GET /k），给管理员复制到客户端的 -server-key 参数
+		"publicKey":   base64.StdEncoding.EncodeToString(s.PublicKey()),
+		"fingerprint": proto.Fingerprint(s.PublicKey()),
 	}, nil
 }
 

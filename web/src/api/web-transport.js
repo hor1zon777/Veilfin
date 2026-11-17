@@ -13,6 +13,7 @@ export class WebTransport {
 
   constructor(cfg) {
     this.apiBase = (cfg.apiBase || '').replace(/\/$/, '')
+    this.pubB64 = cfg.pubkey
     this.pub = b64decode(cfg.pubkey)
     this.fp = fingerprint(this.pub)
     this.sess = null
@@ -209,6 +210,8 @@ export class WebTransport {
       mode: 'web',
       server: location.origin + (this.apiBase ? ` → ${this.apiBase}` : ''),
       fingerprint: this.fp,
+      publicKey: this.pubB64,
+      serverUrl: this.apiBase || location.origin,
       suite: 'X25519+ML-KEM-768 / Ed25519 / XChaCha20-Poly1305 ⊂ AES-256-GCM',
       warning: this.warning,
       connected: false,

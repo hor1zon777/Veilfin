@@ -23,6 +23,7 @@ const routes = [
       { path: 'users', component: () => import('./views/admin/Users.vue') },
       { path: 'libraries', component: () => import('./views/admin/Libraries.vue') },
       { path: 'server', component: () => import('./views/admin/Server.vue') },
+      { path: 'backup', component: () => import('./views/admin/Backup.vue') },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },

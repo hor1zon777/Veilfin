@@ -56,6 +56,9 @@ type Config struct {
 	// FFmpegDir 指定 ffmpeg 所在目录，为空则在 PATH 中查找。
 	FFmpegDir string
 	Version   string
+	// Restart 由管理后台在线恢复时调用：请求外层关闭并重新启动服务端（在此之前会应用待恢复的数据）。
+	// 为 nil 时不支持在线恢复。
+	Restart func()
 	// SetupWindow 是尚未初始化时，从启动起允许在网页上完成初始化的时长，默认 30 分钟。
 	// 超时后需要重启服务端重新计时，防止公网上的其他人在管理员之前抢先完成初始化。
 	SetupWindow time.Duration
@@ -66,6 +69,7 @@ const DefaultSetupWindow = 30 * time.Minute
 
 type Server struct {
 	cfg           Config
+	ctx           context.Context // 服务端生命周期，后台的备份 / 恢复任务挂在它上面
 	id            ed25519.PrivateKey
 	keys          *mediacrypt.Keys
 	DB            *db.DB
@@ -82,6 +86,8 @@ type Server struct {
 
 	ucMu      sync.Mutex
 	userCache map[int64]*userAccess
+
+	bk backupState
 
 	now func() time.Time
 }
@@ -110,6 +116,7 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	s := &Server{
 		cfg:       cfg,
+		ctx:       ctx,
 		id:        id,
 		keys:      keys,
 		DB:        d,
@@ -120,6 +127,7 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		hsTokens:  100,
 		now:       time.Now,
 	}
+	s.cleanBackupDir()
 	n, err := d.CountUsers(ctx)
 	if err != nil {
 		return nil, err

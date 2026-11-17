@@ -337,6 +337,7 @@ func (c *Client) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mode":        "local",
 		"server":      c.cfg.Server,
 		"fingerprint": c.ServerFingerprint(),
+		"publicKey":   base64.StdEncoding.EncodeToString(c.pub),
 		"suite":       "X25519+ML-KEM-768 / Ed25519 / XChaCha20-Poly1305 ⊂ AES-256-GCM",
 		"warning":     c.Warning,
 		"connected":   err == nil,

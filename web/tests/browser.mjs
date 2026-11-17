@@ -1,9 +1,9 @@
 // 真实浏览器端到端测试（Edge / Chrome，无头模式）。
 // 用法：npm run build && node tests/browser.mjs
 // 覆盖：网页模式（浏览器内加密 + Service Worker 解密）与本地客户端模式下的初始化、登录、浏览、
-// 播放、拖动、字幕、进度条预览图、继续观看、管理后台页面。截图保存在 tests/screenshots/。
+// 播放、拖动、字幕、进度条预览图、继续观看、管理后台页面、复制公钥、备份 / 下载 / 在线恢复。截图保存在 tests/screenshots/。
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -86,6 +86,9 @@ const srv = await start(['server', '-listen', `127.0.0.1:${port}`, '-data', data
   log.includes('服务端监听') && log.includes('尚未初始化'),
 )
 const pubkey = srv.log.match(/服务端公钥: ([A-Za-z0-9+/=]+)/)[1]
+let srvLog = srv.log
+srv.p.stdout.on('data', (d) => (srvLog += d))
+srv.p.stderr.on('data', (d) => (srvLog += d))
 
 const browser = await puppeteer.launch({
   executablePath: browserPath,
@@ -391,7 +394,7 @@ try {
   await playbackTest(page, webBase, 'web')
   await featureTest(page, webBase, 'web')
 
-  for (const [path, name] of [['/#/admin', 'admin-dashboard'], ['/#/admin/libraries', 'admin-libraries'], ['/#/admin/users', 'admin-users'], ['/#/settings', 'settings'], ['/#/history', 'history'], ['/#/library/1?view=folders', 'library-folders']]) {
+  for (const [path, name] of [['/#/admin', 'admin-dashboard'], ['/#/admin/libraries', 'admin-libraries'], ['/#/admin/users', 'admin-users'], ['/#/admin/server', 'admin-server'], ['/#/admin/backup', 'admin-backup'], ['/#/settings', 'settings'], ['/#/history', 'history'], ['/#/library/1?view=folders', 'library-folders']]) {
     await page.goto(webBase + path, { waitUntil: 'networkidle2' })
     await sleep(1200)
     await shot(page, `web-${name}`)
@@ -489,7 +492,10 @@ try {
     log.includes('本地客户端已启动'),
   )
   const localBase = `http://127.0.0.1:${cport}`
-  const ctx2 = await browser.createBrowserContext()
+  const dlDir = join(work, 'downloads')
+  mkdirSync(dlDir)
+  const ctx2 = await browser.createBrowserContext({ downloadBehavior: { policy: 'allow', downloadPath: dlDir } })
+  await ctx2.overridePermissions(localBase, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'])
   const lp = await newPage(ctx2, 'local')
   await lp.goto(localBase + '/', { waitUntil: 'networkidle2' })
   await lp.waitForSelector('#u', { timeout: 20000 })
@@ -506,6 +512,66 @@ try {
   const lvers = await lp.$$eval('.ver', (v) => v.map((x) => x.textContent))
   ok(lvers.length === 2 && lvers.every((v) => v.startsWith('dev')) && !(await lp.$('.settings .warn')), `本地模式：设置页显示服务端和客户端版本号（${lvers.join(' / ')}）`)
   await shot(lp, 'local-settings')
+
+  // ---- 复制服务端公钥 ----
+  const pkText = await lp.$eval('.copy-field code', (c) => c.textContent).catch(() => '')
+  ok(pkText === pubkey, '本地模式：设置页显示完整的服务端公钥')
+  await lp.click('.copy-field .icon-btn')
+  await sleep(300)
+  const clip = await lp.evaluate(() => navigator.clipboard.readText()).catch((e) => 'ERR ' + e.message)
+  ok(clip === pubkey, '点击复制按钮后，公钥进入剪贴板')
+  await lp.goto(localBase + '/#/admin/server', { waitUntil: 'networkidle2' })
+  await lp.waitForFunction(() => document.querySelectorAll('.copy-field code').length === 3 && location.hash === '#/admin/server', { timeout: 8000 })
+  await sleep(600)
+  const fields = await lp.$$eval('.copy-field code', (cs) => cs.map((c) => c.textContent))
+  ok(fields[0] === pubkey && fields[2]?.includes(`-server http://127.0.0.1:${port} -server-key '${pubkey}'`), '管理后台：服务器设置页显示公钥、指纹和客户端启动命令')
+  await shot(lp, 'local-admin-server')
+
+  // ---- 备份与恢复（在线恢复后服务端在同一进程内重启） ----
+  const lrpc = (m, p) =>
+    lp.evaluate(
+      async (m, p) => {
+        const r = await fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VF-Local': '1' }, body: JSON.stringify({ m, p }) })
+        return r.json()
+      },
+      m,
+      p,
+    )
+  await lp.goto(localBase + '/#/admin/backup', { waitUntil: 'networkidle2' })
+  await lp.waitForSelector('input.pw')
+  const pws = await lp.$$('input.pw')
+  await pws[0].type('backup-pass-1')
+  await pws[1].type('backup-pass-1')
+  await lp.click('form.row .btn.primary')
+  await lp.waitForSelector('.file .name', { timeout: 60000 })
+  const bkName = await lp.$eval('.file .name', (e) => e.textContent)
+  ok(/^veilfin-\d{8}-\d{6}\.vfbak$/.test(bkName), `备份页：创建了备份 ${bkName}`)
+  await shot(lp, 'local-admin-backup')
+  await lp.click('.file .ops .btn') // 下载
+  const dlFile = join(dlDir, bkName)
+  for (let i = 0; i < 50 && !existsSync(dlFile); i++) await sleep(200)
+  await sleep(300)
+  ok(existsSync(dlFile) && readFileSync(dlFile).equals(readFileSync(join(data, 'backups', bkName))), '备份页：下载的备份与服务端上的文件一致')
+  const created = await lrpc('admin.users.create', { username: 'tmpuser', password: 'tmp-password-1' })
+  ok(created.ok, '备份之后新建用户 tmpuser')
+  await (await lp.$$('.file .ops .btn'))[1].click() // 恢复
+  await lp.waitForSelector('.dialog input[type=password]')
+  await lp.type('.dialog input[type=password]', 'backup-pass-1')
+  await lp.click('.dialog footer .btn.primary')
+  await lp.waitForSelector('.staged', { timeout: 30000 })
+  await sleep(600)
+  const stagedText = await lp.$eval('.staged', (e) => e.textContent)
+  ok(stagedText.includes('客户端不需要改动') && stagedText.includes(pubkey), '备份页：校验通过后显示待确认的恢复，公钥未变')
+  await shot(lp, 'local-admin-restore-confirm')
+  const nav = lp.waitForNavigation({ timeout: 60000 })
+  await lp.click('.staged .btn.danger')
+  await sleep(800)
+  await shot(lp, 'local-admin-restarting')
+  await nav
+  ok(srvLog.includes('已从备份恢复数据目录'), '服务端在同一进程内应用恢复并重启')
+  await lp.waitForSelector('.topbar', { timeout: 20000 })
+  const users = await lrpc('admin.users.list', {})
+  ok(users.ok && users.data.some((u) => u.username === 'admin') && !users.data.some((u) => u.username === 'tmpuser'), '恢复后页面自动刷新，仍保持登录，备份之后新建的用户已消失')
   const localErrors = lp.errors.filter((e) => !e.includes('favicon'))
   ok(localErrors.length === 0, '本地模式：没有控制台错误 / CSP 违规' + (localErrors.length ? '\n      ' + localErrors.join('\n      ') : ''))
 } catch (e) {

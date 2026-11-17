@@ -16,6 +16,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/cipher"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -152,24 +153,31 @@ func (s *streamReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// Create 把数据目录备份到 out。
+// Create 把数据目录备份到 out（命令行使用：自己打开数据库做快照）。
 func Create(ctx context.Context, dataDir, out, pass string, withAssets bool) error {
 	if len(pass) < 8 {
 		return errors.New("备份口令至少 8 位")
 	}
-	tmp, err := os.MkdirTemp("", "epbk-*")
+	d, err := db.Open(db.PathIn(dataDir))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return CreateFrom(ctx, d, dataDir, out, pass, withAssets)
+}
+
+// CreateFrom 用已经打开的数据库做快照并备份（服务端运行中也可以使用）。out 必须不存在。
+func CreateFrom(ctx context.Context, d *db.DB, dataDir, out, pass string, withAssets bool) error {
+	if len(pass) < 8 {
+		return errors.New("备份口令至少 8 位")
+	}
+	tmp, err := os.MkdirTemp("", "vfbk-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 	snap := filepath.Join(tmp, dbName)
-	d, err := db.Open(db.PathIn(dataDir))
-	if err != nil {
-		return err
-	}
-	err = d.Snapshot(ctx, snap)
-	d.Close()
-	if err != nil {
+	if err := d.Snapshot(ctx, snap); err != nil {
 		return fmt.Errorf("数据库快照失败: %w", err)
 	}
 
@@ -251,7 +259,10 @@ func Create(ctx context.Context, dataDir, out, pass string, withAssets bool) err
 				return nil
 			}
 			rel, _ := filepath.Rel(dataDir, p)
-			return addFile(p, rel)
+			if err := addFile(p, rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err // 服务端运行中备份时，文件可能刚好被删除，跳过即可
+			}
+			return nil
 		})
 		if err != nil {
 			return err
@@ -276,20 +287,37 @@ func Create(ctx context.Context, dataDir, out, pass string, withAssets bool) err
 	return nil
 }
 
-// Restore 把备份恢复到 dataDir。目标目录已有密钥时需要 force。
-func Restore(in, dataDir, pass string, force bool) error {
-	if _, err := os.Stat(filepath.Join(dataDir, "keys", "identity.key")); err == nil && !force {
-		return errors.New("目标数据目录已有密钥，如确认覆盖请加 -force（会覆盖现有密钥和数据库）")
+// Info 描述一个已解包、校验通过的备份。
+type Info struct {
+	PublicKey ed25519.PublicKey // 备份中服务端身份密钥对应的公钥
+	HasAssets bool              // 是否包含图片 / 字幕 / 预览图缓存
+	Files     int
+}
+
+// IsBackupFile 只检查文件头，判断是不是 Veilfin 备份文件（不验证口令）。
+func IsBackupFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
 	}
+	defer f.Close()
+	b := make([]byte, len(magic))
+	_, err = io.ReadFull(f, b)
+	return err == nil && string(b) == magic
+}
+
+// Extract 解密备份并解包到 stage 目录（应为空目录），全部校验通过才返回成功。
+// 解包结果可以交给 Apply 应用到数据目录。
+func Extract(in, stage, pass string) (*Info, error) {
 	f, err := os.Open(in)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	br := bufio.NewReaderSize(f, 1<<20)
 	header := make([]byte, headerLen)
 	if _, err := io.ReadFull(br, header); err != nil || string(header[:len(magic)]) != magic {
-		return errors.New("不是 Veilfin 备份文件")
+		return nil, errors.New("不是 Veilfin 备份文件")
 	}
 	p := header[len(magic):]
 	salt := p[:16]
@@ -298,26 +326,18 @@ func Restore(in, dataDir, pass string, force bool) error {
 	par := p[24]
 	prefix := p[25:41]
 	if t == 0 || t > 20 || m < 8*1024 || m > 1024*1024 || par == 0 || par > 16 { // 内存上限 1 GiB
-		return errors.New("备份文件参数异常")
+		return nil, errors.New("备份文件参数异常")
 	}
 	aead, err := deriveKey(pass, salt, t, m, par)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sr := &streamReader{r: br, aead: aead, header: header, prefix: prefix}
 	gz, err := gzip.NewReader(sr)
 	if err != nil {
-		if errors.Is(err, ErrBadPass) {
-			return ErrBadPass
-		}
-		return ErrBadPass
+		return nil, ErrBadPass
 	}
-	// 先解到临时目录，全部校验通过后再替换，避免恢复到一半留下残缺的数据
-	stage, err := os.MkdirTemp(filepath.Dir(filepath.Clean(dataDir)), ".restore-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(stage)
+	info := &Info{}
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -325,40 +345,63 @@ func Restore(in, dataDir, pass string, force bool) error {
 			break
 		}
 		if err != nil {
-			return ErrBadPass
+			return nil, ErrBadPass
 		}
 		name := filepath.FromSlash(hdr.Name)
 		if !filepath.IsLocal(name) || hdr.Typeflag != tar.TypeReg {
-			return fmt.Errorf("备份中包含非法路径: %s", hdr.Name)
+			return nil, fmt.Errorf("备份中包含非法路径: %s", hdr.Name)
+		}
+		if strings.HasPrefix(hdr.Name, "assets/") {
+			info.HasAssets = true
 		}
 		dst := filepath.Join(stage, name)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return err
+			return nil, err
 		}
 		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := io.Copy(out, tr); err != nil {
 			out.Close()
-			return ErrBadPass
+			return nil, ErrBadPass
 		}
-		out.Close()
+		if err := out.Close(); err != nil {
+			return nil, err
+		}
+		info.Files++
 	}
 	if _, err := io.Copy(io.Discard, sr); err != nil || !sr.done {
-		return ErrBadPass
+		return nil, ErrBadPass
 	}
 	for _, need := range []string{"keys/identity.key", "keys/media.key", dbName} {
 		if _, err := os.Stat(filepath.Join(stage, need)); err != nil {
-			return fmt.Errorf("备份不完整，缺少 %s", need)
+			return nil, fmt.Errorf("备份不完整，缺少 %s", need)
 		}
 	}
+	seed, err := os.ReadFile(filepath.Join(stage, "keys", "identity.key"))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return nil, errors.New("备份中的身份密钥长度异常")
+	}
+	if mk, err := os.ReadFile(filepath.Join(stage, "keys", "media.key")); err != nil || len(mk) != 32 {
+		return nil, errors.New("备份中的媒体密钥长度异常")
+	}
+	info.PublicKey = ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	clear(seed)
+	return info, nil
+}
+
+// Apply 把 Extract 解包出的文件移动到数据目录，覆盖同名的密钥、数据库和缓存文件。
+// 调用前必须关闭数据库。中途失败可以再次调用（已移动的文件不会重复处理）。
+func Apply(stage, dataDir string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return err
 	}
 	// 删除旧数据库的 WAL 文件，避免与恢复的数据库混用
-	for _, suffix := range []string{"-wal", "-shm"} {
-		os.Remove(filepath.Join(dataDir, dbName+suffix))
+	if _, err := os.Stat(filepath.Join(stage, dbName)); err == nil {
+		for _, suffix := range []string{"-wal", "-shm"} {
+			os.Remove(filepath.Join(dataDir, dbName+suffix))
+		}
 	}
 	return filepath.WalkDir(stage, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
@@ -371,10 +414,58 @@ func Restore(in, dataDir, pass string, force bool) error {
 		}
 		os.Remove(dst)
 		if err := os.Rename(p, dst); err != nil {
-			return copyFile(p, dst)
+			if err := copyFile(p, dst); err != nil {
+				return err
+			}
+			os.Remove(p)
 		}
 		return nil
 	})
+}
+
+// Restore 把备份恢复到 dataDir（命令行使用，需先停止服务端）。目标目录已有密钥时需要 force。
+func Restore(in, dataDir, pass string, force bool) error {
+	if _, err := os.Stat(filepath.Join(dataDir, "keys", "identity.key")); err == nil && !force {
+		return errors.New("目标数据目录已有密钥，如确认覆盖请加 -force（会覆盖现有密钥和数据库）")
+	}
+	// 先解到临时目录，全部校验通过后再替换，避免恢复到一半留下残缺的数据
+	stage, err := os.MkdirTemp(filepath.Dir(filepath.Clean(dataDir)), ".restore-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	if _, err := Extract(in, stage, pass); err != nil {
+		return err
+	}
+	return Apply(stage, dataDir)
+}
+
+// 在线恢复（管理后台）使用数据目录下的两个目录：
+//
+//	restore-staged   已解包、校验通过，等待管理员确认
+//	restore-pending  管理员已确认，服务端下次启动（或在线重启）前应用
+const (
+	StagedDir  = "restore-staged"
+	PendingDir = "restore-pending"
+)
+
+// ApplyPending 在打开数据库之前调用：如果有已确认的恢复，就应用它。
+// 同时清理没有确认的暂存目录和解包残留。返回是否应用了恢复。
+func ApplyPending(dataDir string) (bool, error) {
+	os.RemoveAll(filepath.Join(dataDir, StagedDir))
+	if tmps, _ := filepath.Glob(filepath.Join(dataDir, ".restore-*")); len(tmps) > 0 {
+		for _, t := range tmps {
+			os.RemoveAll(t)
+		}
+	}
+	pending := filepath.Join(dataDir, PendingDir)
+	if _, err := os.Stat(pending); err != nil {
+		return false, nil
+	}
+	if err := Apply(pending, dataDir); err != nil {
+		return false, fmt.Errorf("应用恢复失败（%s 保留着待恢复的文件，可重启再试）: %w", pending, err)
+	}
+	return true, os.RemoveAll(pending)
 }
 
 func copyFile(src, dst string) error {

@@ -83,6 +83,12 @@ func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Servi
 	return s
 }
 
+// Stopped 等待后台任务全部退出（需先结束创建服务时传入的 ctx），之后才能安全地关闭数据库。
+func (s *Service) Stopped() {
+	s.Main.Stopped()
+	s.Heavy.Stopped()
+}
+
 // ---- 设置 ----
 
 func (s *Service) Settings(ctx context.Context) Settings {

@@ -63,6 +63,9 @@ func New(ctx context.Context, name string, workers int) *Queue {
 	return q
 }
 
+// Stopped 等待所有工作协程退出（创建队列时传入的 ctx 结束后才会退出）。
+func (q *Queue) Stopped() { q.wg.Wait() }
+
 // Add 加入任务。同一个 key 已在排队时忽略（正在运行的不算，允许再排一次）。
 func (q *Queue) Add(key, label string, fn func(ctx context.Context) error) {
 	q.mu.Lock()

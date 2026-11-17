@@ -1,12 +1,26 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import { state, rpc, toast, toastError } from '../../store.js'
+import { ref, computed, onMounted } from 'vue'
+import { state, rpc, toast, toastError, connectionStatus } from '../../store.js'
+import CopyField from '../../components/CopyField.vue'
 
 const s = ref(null)
 const ffmpeg = ref(true)
 const busy = ref(false)
+const info = ref(null)
+const serverUrl = ref('')
+
+// 本地客户端的启动命令：固定信任当前服务端公钥
+const clientCmd = computed(() =>
+  info.value ? `veilfin client -server ${serverUrl.value || 'https://你的域名'} -server-key '${info.value.publicKey}'` : '',
+)
 
 onMounted(async () => {
+  rpc('sys.info')
+    .then((i) => (info.value = i))
+    .catch(() => {})
+  connectionStatus()
+    .then((c) => (serverUrl.value = c.mode === 'local' ? c.server : c.serverUrl))
+    .catch(() => {})
   try {
     const r = await rpc('admin.settings.get')
     s.value = r.settings
@@ -34,7 +48,24 @@ async function save() {
   <div class="admin-body">
     <p v-if="!ffmpeg" class="warn card-panel">服务端没有找到 ffmpeg / ffprobe：视频可以播放，但不会生成截图、字幕和进度条预览图。请安装 ffmpeg 或启动时用 -ffmpeg 指定目录。</p>
     <form v-if="s" class="settings" @submit.prevent="save">
-      <section class="card-panel d1">
+      <section v-if="info?.publicKey" class="card-panel d1">
+        <h2>服务端身份</h2>
+        <div class="field">
+          <label>服务端公钥</label>
+          <CopyField :text="info.publicKey" label="服务端公钥" />
+        </div>
+        <div class="field">
+          <label>公钥指纹（给人工核对用）</label>
+          <CopyField :text="info.fingerprint" label="公钥指纹" />
+        </div>
+        <div class="field">
+          <label>本地客户端启动命令</label>
+          <CopyField :text="clientCmd" label="启动命令" />
+          <span class="hint">在电脑上运行这条命令，客户端会固定信任这个公钥；服务端被替换或遭到中间人攻击时会拒绝连接。</span>
+        </div>
+      </section>
+
+      <section class="card-panel d2">
         <h2>常规</h2>
         <div class="field"><label>服务器名称</label><input v-model="s.serverName" class="input" /></div>
         <div class="field">
@@ -45,7 +76,7 @@ async function save() {
         <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（只解码关键帧，3 小时视频约需几十秒）</label>
       </section>
 
-      <section class="card-panel d2">
+      <section class="card-panel d3">
         <h2>TMDB（普通电影）</h2>
         <div class="field">
           <label>API Key 或读访问令牌</label>
@@ -54,7 +85,7 @@ async function save() {
         <div class="field"><label>语言</label><input v-model="s.tmdbLang" class="input short" placeholder="zh-CN" /></div>
       </section>
 
-      <section class="card-panel d3">
+      <section class="card-panel d4">
         <h2>MetaTube（番号刮削）</h2>
         <div class="field">
           <label>服务地址</label>
@@ -64,7 +95,7 @@ async function save() {
         <div class="field"><label>访问令牌（可选）</label><input v-model="s.metatubeToken" class="input" type="password" autocomplete="off" /></div>
       </section>
 
-      <section class="card-panel d4">
+      <section class="card-panel d5">
         <h2>网络</h2>
         <div class="field">
           <label>刮削代理（可选）</label>

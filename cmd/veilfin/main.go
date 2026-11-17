@@ -153,49 +153,94 @@ func runServer(args []string) error {
 	}
 	ctx, cancel := signalContext()
 	defer cancel()
-	srv, err := server.New(ctx, server.Config{
+	cfg := server.Config{
 		DataDir: *data, InitialMedia: *media, Web: *web, APIBase: strings.TrimRight(*apiBase, "/"),
 		WebOrigin: strings.TrimRight(*webOrigin, "/"), FFmpegDir: *ffdir, Version: version,
-	})
-	if err != nil {
-		return err
 	}
-	defer srv.Close()
+	// 管理后台在线恢复时会请求重启：在同一进程内关闭服务端、应用恢复、重新启动，不依赖外部的进程管理
+	for first := true; ; first = false {
+		restart, err := serveOnce(ctx, cfg, *listen, *tlsCert, *tlsKey, first)
+		if err != nil || !restart {
+			return err
+		}
+		log.Printf("服务端正在重启……")
+	}
+}
+
+// serveOnce 启动一次服务端，直到收到退出信号（返回 false）或在线恢复请求重启（返回 true）。
+func serveOnce(parent context.Context, cfg server.Config, listen, tlsCert, tlsKey string, first bool) (bool, error) {
+	applied, err := backup.ApplyPending(cfg.DataDir)
+	if err != nil {
+		return false, err
+	}
+	if applied {
+		log.Printf("已从备份恢复数据目录 %s", cfg.DataDir)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	restartCh := make(chan struct{}, 1)
+	cfg.Restart = func() {
+		select {
+		case restartCh <- struct{}{}:
+		default:
+		}
+	}
+	srv, err := server.New(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		cancel()
+		srv.Lib.Stopped() // 等后台任务退出后再关闭数据库，之后才能安全地替换数据库文件
+		srv.Close()
+	}()
 	pub := srv.PublicKey()
-	log.Printf("Veilfin %s", version)
-	log.Printf("服务端公钥: %s", base64.StdEncoding.EncodeToString(pub))
-	log.Printf("公钥指纹:   %s", proto.Fingerprint(pub))
+	if first || applied {
+		log.Printf("Veilfin %s", version)
+		log.Printf("服务端公钥: %s", base64.StdEncoding.EncodeToString(pub))
+		log.Printf("公钥指纹:   %s", proto.Fingerprint(pub))
+	}
 	if srv.NeedsSetup() {
 		log.Printf("★ 尚未初始化：请在 %d 分钟内用浏览器打开本服务，按设置向导创建管理员（超时后重启服务端即可重新计时）",
 			int(server.DefaultSetupWindow.Minutes()))
 	}
-	if *web {
+	if cfg.Web && first {
 		log.Printf("网页模式已开启")
 	}
 	go srv.Run(ctx)
 
 	hs := &http.Server{
-		Addr:              *listen,
+		Addr:              listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	restart := make(chan bool, 1)
+	stopped := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer close(stopped)
+		select {
+		case <-ctx.Done():
+			restart <- false
+		case <-restartCh:
+			restart <- true
+		}
+		// Shutdown 会等正在处理的请求结束，之后才能关闭数据库
+		sctx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
 		hs.Shutdown(sctx)
 	}()
-	log.Printf("服务端监听 %s", *listen)
-	if *tlsCert != "" {
-		err = hs.ListenAndServeTLS(*tlsCert, *tlsKey)
+	log.Printf("服务端监听 %s", listen)
+	if tlsCert != "" {
+		err = hs.ListenAndServeTLS(tlsCert, tlsKey)
 	} else {
 		err = hs.ListenAndServe()
 	}
 	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+		<-stopped
+		return <-restart && parent.Err() == nil, nil
 	}
-	return err
+	return false, err
 }
 
 func runClient(args []string) error {

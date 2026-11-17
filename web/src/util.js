@@ -112,3 +112,45 @@ export function fmtRemain(item) {
 export function randomSeed() {
   return crypto.getRandomValues(new Uint32Array(1))[0]
 }
+
+// 复制文本到剪贴板。通过局域网 IP（非 HTTPS）访问时没有 Clipboard API，退回到 execCommand。
+export async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return
+    } catch {}
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.className = 'offscreen'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } finally {
+    ta.remove()
+  }
+  if (!ok) throw new Error('复制失败，请手动选中复制')
+}
+
+export function b64ToBytes(s) {
+  const bin = atob(s)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+// 让浏览器把 Blob 保存成文件
+export function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}

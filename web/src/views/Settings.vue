@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { state, rpc, toast, toastError, connectionStatus } from '../store.js'
 import { fmtDateTime } from '../util.js'
 import Icon from '../components/Icon.vue'
+import CopyField from '../components/CopyField.vue'
 
 const conn = ref(null)
 const pw = ref({ old: '', new1: '', new2: '' })
@@ -71,6 +72,10 @@ async function setBlur(v) {
         <span>加密套件</span><span>{{ conn.suite }}</span>
         <span>会话</span><span>{{ conn.connected ? `已建立 ${conn.sessionAge} 秒，发送密钥第 ${conn.sendEpoch} 代` : '未连接：' + (conn.error || '') }}</span>
       </div>
+      <div v-if="conn?.publicKey" class="field pk">
+        <label>服务端公钥（本客户端信任的公钥，可用于其他客户端的 -server-key 参数）</label>
+        <CopyField :text="conn.publicKey" label="服务端公钥" />
+      </div>
       <p v-if="conn?.warning" class="warn">{{ conn.warning }}</p>
       <p class="hint">请把公钥指纹和服务端启动日志里打印的指纹对比，一致才说明连接没有被中间人替换。</p>
     </section>
@@ -137,6 +142,7 @@ section { margin-bottom: 18px; }
 h2 { font-size: 17px; margin-bottom: 14px; }
 .kv { display: grid; grid-template-columns: 90px 1fr; gap: 8px 14px; font-size: 13.5px; margin-bottom: 10px; }
 .kv > span:nth-child(odd) { color: var(--muted); }
+.pk { margin: 4px 0 10px; }
 .ver { font-family: Consolas, ui-monospace, monospace; font-size: 13px; }
 .kv code { font-size: 13px; color: var(--accent); }
 .warn { color: var(--warn); }

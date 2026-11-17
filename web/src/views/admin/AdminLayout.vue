@@ -17,6 +17,7 @@ const { style } = useIndicator(tabs, 'a.on', () => route.path)
       <router-link to="/admin/libraries" active-class="on">媒体库</router-link>
       <router-link to="/admin/users" active-class="on">用户</router-link>
       <router-link to="/admin/server" active-class="on">服务器设置</router-link>
+      <router-link to="/admin/backup" active-class="on">备份与恢复</router-link>
     </nav>
     <router-view v-slot="{ Component, route: r }">
       <Transition name="page-tab" type="transition" mode="out-in">

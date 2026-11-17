@@ -127,6 +127,7 @@ function onProgress() {
 function onPlay() {
   playing.value = true
   ended.value = false
+  cancelNext() // 播完后又重新播放：取消“下一个”的倒计时，否则会被强行跳走
   poke()
 }
 function onPause() {
@@ -146,6 +147,7 @@ function onEnded() {
   report()
   if (data.value?.next) {
     countdown.value = 10
+    clearInterval(countdownTimer) // 重播后再次播完：先清掉旧的，不然旧定时器丢了句柄、一直在跑
     countdownTimer = setInterval(() => {
       countdown.value--
       if (countdown.value <= 0) playNext()
@@ -414,10 +416,12 @@ function back() {
 }
 function playNext() {
   clearInterval(countdownTimer)
+  countdownTimer = null
   if (data.value?.next) router.replace({ path: `/play/${data.value.next.id}`, query: queue.value ? { queue: '1' } : {} })
 }
 function cancelNext() {
   clearInterval(countdownTimer)
+  countdownTimer = null
   countdown.value = 0
 }
 function onUnload() {

@@ -176,7 +176,7 @@ func rpcUsersUpdate(s *Server, c *call) (any, error) {
 		return nil, err
 	}
 	if p.Disabled || p.Password != "" {
-		s.sessions.logoutUser(p.ID)
+		s.sessions.logoutUser(p.ID, nil)
 	}
 	s.invalidateAccess()
 	return struct{}{}, nil
@@ -204,7 +204,7 @@ func rpcUsersDelete(s *Server, c *call) (any, error) {
 	if err := s.DB.DeleteUser(c.ctx, p.ID); err != nil {
 		return nil, err
 	}
-	s.sessions.logoutUser(p.ID)
+	s.sessions.logoutUser(p.ID, nil)
 	s.invalidateAccess()
 	return struct{}{}, nil
 }

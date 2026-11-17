@@ -249,6 +249,11 @@ ALTER TABLE users ADD COLUMN pin_fails INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN pin_locked_until INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN token_gen INTEGER NOT NULL DEFAULT 0;
 `,
+	// v3：最近一次失败的时间。失败计数隔一段时间没有新失败就归零，锁定到期后也从头计数
+	`
+ALTER TABLE users ADD COLUMN last_failed_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN pin_last_failed_at INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 func (d *DB) migrate() error {

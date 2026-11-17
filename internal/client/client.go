@@ -236,16 +236,20 @@ func (c *Client) handleRPC(w http.ResponseWriter, r *http.Request) {
 		params = api.TokenParams{Token: b.tr.token()}
 	}
 	raw, err := b.tr.Call(ctx, in.M, params)
-	switch in.M {
-	case "auth.logout", "auth.lock", "auth.setPin", "auth.changePassword":
-		// 锁定 / 退出后，丢弃这个浏览器的对象密钥和已解密的数据块（受限内容不能再从缓存里读出来）
-		c.forgetBlobs(b)
-		if in.M == "auth.logout" {
-			b.tr.setAuth("", false)
+	// 改 PIN / 改密码 / 解锁失败（比如密码输错）时服务端什么都没变，不能清掉对象密钥，否则页面上的图片全部 404；
+	// 退出和锁定则无论成败都要清，用户的意图就是让内容不再可见
+	if err == nil || in.M == "auth.logout" || in.M == "auth.lock" {
+		switch in.M {
+		case "auth.logout", "auth.lock", "auth.setPin", "auth.changePassword":
+			// 锁定 / 退出后，丢弃这个浏览器的对象密钥和已解密的数据块（受限内容不能再从缓存里读出来）
+			c.forgetBlobs(b)
+			if in.M == "auth.logout" {
+				b.tr.setAuth("", false)
+			}
+			b.tr.resetBlobToken()
+		case "auth.unlock":
+			b.tr.resetBlobToken() // 解锁状态变了，访问令牌要重新获取
 		}
-		b.tr.resetBlobToken()
-	case "auth.unlock":
-		b.tr.resetBlobToken() // 解锁状态变了，访问令牌要重新获取
 	}
 	if err != nil {
 		writeErr(w, err)

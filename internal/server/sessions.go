@@ -31,6 +31,18 @@ func (ss *serverSession) setUser(uid int64) {
 	ss.mu.Unlock()
 }
 
+// reserveLoginAttempt 在校验密码前先给本会话记一次失败（登录成功后 setUser 会清零）。
+// 返回 false 表示本会话的失败次数已达上限。
+func (ss *serverSession) reserveLoginAttempt(max int) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.loginFails >= max {
+		return false
+	}
+	ss.loginFails++
+	return true
+}
+
 func (ss *serverSession) uid() int64 {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
@@ -119,11 +131,14 @@ func (st *sessionStore) clear() {
 	st.mu.Unlock()
 }
 
-// logoutUser 让某个用户的所有会话退出登录（禁用账号、删除账号时使用）。
-func (st *sessionStore) logoutUser(uid int64) {
+// logoutUser 让某个用户的所有会话退出登录（禁用账号、删除账号、改密码时使用），keep 不为 nil 时保留这个会话。
+func (st *sessionStore) logoutUser(uid int64, keep *serverSession) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for _, ss := range st.m {
+		if ss == keep {
+			continue
+		}
 		ss.mu.Lock()
 		if ss.userID == uid {
 			ss.userID = 0

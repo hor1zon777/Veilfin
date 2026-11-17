@@ -102,10 +102,45 @@ func (d *DB) BumpTokenGen(ctx context.Context, id int64) error {
 	return err
 }
 
-// RecordPinFailure 记录一次 PIN 错误，达到阈值后锁定到 lockUntil（持久化，换会话也绕不过）。
-func (d *DB) RecordPinFailure(ctx context.Context, id int64, threshold int, lockUntil int64) error {
-	_, err := d.W.ExecContext(ctx, `UPDATE users SET pin_fails = pin_fails + 1,
-		pin_locked_until = CASE WHEN pin_fails + 1 >= ? THEN ? ELSE pin_locked_until END WHERE id=?`, threshold, lockUntil, id)
+// AttemptPolicy 是失败锁定的参数：Window 内累计 Threshold 次失败就锁定 Window 这么久；
+// 距离上次失败超过 Window 的话计数从头开始（所以锁定到期后不会一次失败就立刻再锁）。
+type AttemptPolicy struct {
+	Threshold int
+	Window    int64 // 秒
+}
+
+// reserveAttempt 在校验之前先原子地记一次失败（“占坑”），校验成功后再清零。
+// 这样并发的请求不能同时通过“是否已锁定”的检查，客户端中途断开也不会漏记。
+// 返回 false 表示正处于锁定期（或用户不存在），不应再校验。
+func (d *DB) reserveAttempt(ctx context.Context, failsCol, lastCol, lockCol string, id int64, p AttemptPolicy, now int64) (bool, error) {
+	fails := "CASE WHEN " + lastCol + " <= :cut THEN 1 ELSE " + failsCol + " + 1 END"
+	res, err := d.W.ExecContext(ctx, "UPDATE users SET "+
+		failsCol+" = "+fails+", "+
+		lastCol+" = :now, "+
+		lockCol+" = CASE WHEN "+fails+" >= :th THEN :until ELSE "+lockCol+" END "+
+		"WHERE id = :id AND "+lockCol+" <= :now",
+		sql.Named("cut", now-p.Window), sql.Named("now", now), sql.Named("th", p.Threshold),
+		sql.Named("until", now+p.Window), sql.Named("id", id))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ReserveLoginAttempt 在校验密码前记一次失败，见 reserveAttempt。
+func (d *DB) ReserveLoginAttempt(ctx context.Context, id int64, p AttemptPolicy, now int64) (bool, error) {
+	return d.reserveAttempt(ctx, "failed_logins", "last_failed_at", "locked_until", id, p, now)
+}
+
+// ReservePinAttempt 在校验 PIN 前记一次失败（持久化，换会话也绕不过），见 reserveAttempt。
+func (d *DB) ReservePinAttempt(ctx context.Context, id int64, p AttemptPolicy, now int64) (bool, error) {
+	return d.reserveAttempt(ctx, "pin_fails", "pin_last_failed_at", "pin_locked_until", id, p, now)
+}
+
+// ResetLoginFailures 在密码校验通过后清掉失败计数。
+func (d *DB) ResetLoginFailures(ctx context.Context, id int64) error {
+	_, err := d.W.ExecContext(ctx, "UPDATE users SET failed_logins=0, locked_until=0 WHERE id=?", id)
 	return err
 }
 
@@ -121,13 +156,6 @@ func (d *DB) SetBlur(ctx context.Context, id int64, blur bool) error {
 
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 	_, err := d.W.ExecContext(ctx, "DELETE FROM users WHERE id=?", id)
-	return err
-}
-
-// RecordLoginFailure 记录一次失败，达到阈值后锁定到 lockUntil。
-func (d *DB) RecordLoginFailure(ctx context.Context, id int64, threshold int, lockUntil int64) error {
-	_, err := d.W.ExecContext(ctx, `UPDATE users SET failed_logins = failed_logins + 1,
-		locked_until = CASE WHEN failed_logins + 1 >= ? THEN ? ELSE locked_until END WHERE id=?`, threshold, lockUntil, id)
 	return err
 }
 

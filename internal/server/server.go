@@ -631,8 +631,12 @@ func (s *Server) dispatch(ctx context.Context, ss *serverSession, req *api.Reque
 
 type ghost struct {
 	fails int
-	until time.Time
+	last  time.Time // 最近一次失败
+	until time.Time // 锁定到期时间
 }
+
+// attemptPolicy 是登录 / PIN 失败锁定的参数：15 分钟内错 5 次锁 15 分钟。
+var attemptPolicy = db.AttemptPolicy{Threshold: maxLoginFails, Window: int64(lockoutTime / time.Second)}
 
 // slowFail 在认证失败时等待一会儿，拖慢暴力破解（真正的限制靠按账号持久化的锁定）。
 func (s *Server) slowFail() {

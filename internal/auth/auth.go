@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -23,11 +24,25 @@ const (
 
 var ErrMismatch = errors.New("密码不正确")
 
+// kdfSlots 限制同时进行的 Argon2 计算数：每次要占 64 MiB 内存，
+// 不加限制的话，并发的登录请求（不需要登录就能发）可以把内存耗尽。超出的请求排队等待。
+var kdfSlots = make(chan struct{}, kdfConcurrency())
+
+func kdfConcurrency() int {
+	return min(max(runtime.NumCPU(), 2), 4)
+}
+
+func idKey(password, salt []byte, t, m uint32, p uint8, n uint32) []byte {
+	kdfSlots <- struct{}{}
+	defer func() { <-kdfSlots }()
+	return argon2.IDKey(password, salt, t, m, p, n)
+}
+
 // Hash 返回 PHC 格式的 Argon2id 哈希串。
 func Hash(password string) string {
 	salt := make([]byte, saltLen)
 	rand.Read(salt)
-	key := argon2.IDKey([]byte(password), salt, iters, memKiB, threads, keyLen)
+	key := idKey([]byte(password), salt, iters, memKiB, threads, keyLen)
 	enc := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, memKiB, iters, threads, enc.EncodeToString(salt), enc.EncodeToString(key))
 }
@@ -57,7 +72,7 @@ func Verify(hash, password string) error {
 	if err != nil {
 		return ErrMismatch
 	}
-	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
+	got := idKey([]byte(password), salt, t, m, p, uint32(len(want)))
 	if subtle.ConstantTimeCompare(got, want) != 1 {
 		return ErrMismatch
 	}

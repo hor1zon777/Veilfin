@@ -71,6 +71,15 @@ type Service struct {
 	settings *Settings
 	watcher  *watcher
 	progress progressSet
+
+	scanMu   sync.Mutex
+	scanning map[int64]*rescan // 正在扫描的媒体库；同一个库同时只跑一次扫描
+}
+
+// rescan 记录扫描进行期间又有人要求扫描：当前这次结束后再补扫一次。
+type rescan struct {
+	again   bool
+	refresh bool
 }
 
 func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Service {
@@ -81,6 +90,7 @@ func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Servi
 		Main:     tasks.New(ctx, "元数据", 2),
 		Heavy:    tasks.New(ctx, "预览图", 1),
 		baseCtx:  ctx,
+		scanning: map[int64]*rescan{},
 	}
 	s.NewProvider = s.defaultProvider
 	return s
@@ -140,6 +150,9 @@ func (s *Service) defaultProvider(kind string, st Settings) (scraper.Provider, e
 
 // EnqueueScan 把媒体库扫描加入队列。refresh 为 true 时会重新读取所有条目的元数据（不覆盖手动锁定的字段）。
 func (s *Service) EnqueueScan(libID int64, refresh bool) {
+	if s.deferScan(libID, refresh) {
+		return
+	}
 	key := fmt.Sprintf("scan:%d", libID)
 	label := fmt.Sprintf("扫描媒体库 #%d", libID)
 	if refresh {
@@ -152,12 +165,43 @@ func (s *Service) EnqueueScan(libID int64, refresh bool) {
 
 // ScanLibrary 扫描媒体库目录，同步新增 / 变化 / 删除的文件，并把需要处理的条目加入队列。
 func (s *Service) ScanLibrary(ctx context.Context, libID int64, refresh bool) error {
+	// 同一个库的扫描不能并行（任务队列有两个工作协程，“扫描”和“扫描并刷新”的 key 也不同）：
+	// 两次扫描各拿一份旧的条目快照，会重复删除、重复插入
+	s.scanMu.Lock()
+	if r := s.scanning[libID]; r != nil {
+		r.again, r.refresh = true, r.refresh || refresh
+		s.scanMu.Unlock()
+		return nil
+	}
+	s.scanning[libID] = &rescan{}
+	s.scanMu.Unlock()
+	defer func() {
+		s.scanMu.Lock()
+		r := s.scanning[libID]
+		delete(s.scanning, libID)
+		s.scanMu.Unlock()
+		if r.again && ctx.Err() == nil {
+			s.EnqueueScan(libID, r.refresh)
+		}
+	}()
 	s.progress.startScan(libID, refresh)
 	if err := s.scanLibrary(ctx, libID, refresh); err != nil {
 		s.progress.failScan(libID, err)
 		return err
 	}
 	return nil
+}
+
+// deferScan 在这个库正在扫描时记下“结束后再扫一次”并返回 true。
+func (s *Service) deferScan(libID int64, refresh bool) bool {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	r := s.scanning[libID]
+	if r == nil {
+		return false
+	}
+	r.again, r.refresh = true, r.refresh || refresh
+	return true
 }
 
 func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) error {
@@ -253,8 +297,18 @@ func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) er
 		}
 	}
 
+	var roots []string
+	for _, r := range lib.Paths {
+		roots = append(roots, filepath.Clean(r))
+	}
+	emptyDirs := map[string]bool{}
 	for path, ex := range existing {
 		if seen[path] || underAny(path, unavailable) {
+			continue
+		}
+		if dir, ok := mountGone(path, roots, emptyDirs); ok {
+			// 子目录是空的：多半是 NAS 子目录掉线 / 没挂载上，不能当成文件被删了（删条目会连带清掉观看进度）
+			log.Printf("媒体库「%s」的目录 %s 是空的，可能未挂载，保留其下的条目 %s", lib.Name, dir, path)
 			continue
 		}
 		files, err := s.DB.DeleteItem(ctx, ex.ID)
@@ -339,6 +393,39 @@ func underAny(path string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// mountGone 判断找不到的文件是不是因为目录没挂载上：从文件所在目录往上找到第一个还存在的目录
+// （不超过媒体库根目录），这个目录完全是空的（连隐藏文件都没有）就认为是没挂载上的挂载点。
+// 读不了的目录也按没挂载处理。确实删掉了某个文件夹里唯一的视频时，把空文件夹一起删掉条目才会移除。
+func mountGone(path string, roots []string, cache map[string]bool) (string, bool) {
+	root := ""
+	for _, r := range roots {
+		if underAny(path, []string{r}) && len(r) > len(root) {
+			root = r
+		}
+	}
+	if root == "" {
+		return "", false
+	}
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		if gone, ok := cache[dir]; ok {
+			return dir, gone
+		}
+		entries, err := os.ReadDir(dir)
+		switch {
+		case err == nil:
+			cache[dir] = len(entries) == 0
+			return dir, cache[dir]
+		case !errors.Is(err, fs.ErrNotExist):
+			cache[dir] = true
+			return dir, true
+		}
+		// 目录不存在：往上一级找；到了根目录（根目录不存在的情况前面已经处理过）就不再往上
+		if dir == root || len(dir) <= len(root) {
+			return dir, false
+		}
+	}
 }
 
 func hasUnder(existing map[string]db.FileState, root string) bool {

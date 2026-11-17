@@ -142,6 +142,9 @@ export class WebTransport {
   }
 
   after(m, err) {
+    // 改 PIN / 改密码 / 解锁失败（比如密码输错）时服务端什么都没变，不能清掉对象密钥，否则页面上的图片全部 404；
+    // 退出和锁定则无论成败都要清，用户的意图就是让内容不再可见
+    if (err && m !== 'auth.logout' && m !== 'auth.lock') return err
     if (m === 'auth.logout') {
       localStorage.removeItem(TOKEN_KEY)
       this.authed = false

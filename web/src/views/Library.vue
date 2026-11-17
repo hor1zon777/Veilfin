@@ -121,29 +121,32 @@ function params() {
   return p
 }
 
-let gen = 0 // 每次重新加载列表加一，静默刷新据此丢弃过期结果
+let gen = 0 // 每次重新加载列表加一：还没返回的旧请求（翻页、静默刷新）据此丢弃结果
 async function load(reset) {
-  if (loading.value) return
   if (reset) {
+    // 条件变了一定要重新加载，不能因为上一页还在加载就丢掉（否则列表和 URL 里的筛选条件对不上）
     gen++
     items.value = []
     folders.value = []
     done.value = false
-  }
+  } else if (loading.value) return
   if (done.value) return
+  const g = gen
   loading.value = true
   try {
     const r = await rpc('items.list', { ...params(), offset: items.value.length, limit: PAGE })
+    if (g !== gen) return
     if (reset) folders.value = r.folders || []
     items.value.push(...r.items)
     total.value = r.total
     done.value = items.value.length >= r.total || r.items.length === 0
     firstLoad.value = false
   } catch (e) {
+    if (g !== gen) return
     toastError(e)
     done.value = true
   } finally {
-    loading.value = false
+    if (g === gen) loading.value = false
   }
   await nextTick()
   checkSentinel()

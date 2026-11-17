@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -181,48 +182,70 @@ func rpcLogin(s *Server, c *call) (any, error) {
 	if err := c.bind(&p); err != nil {
 		return nil, err
 	}
-	c.ss.mu.Lock()
-	fails := c.ss.loginFails
-	c.ss.mu.Unlock()
-	if fails >= maxLoginFails {
+	// 所有失败计数都是“先记一次再校验，成功后清零”：并发请求不能同时通过“是否已锁定”的检查，
+	// 校验途中客户端断开也不会漏记
+	if !c.ss.reserveLoginAttempt(maxLoginFails) {
 		return nil, errf(api.CodeTooMany, "失败次数过多，请稍后重试")
 	}
 	name := strings.TrimSpace(p.Username)
 	u, err := s.DB.UserByName(c.ctx, name)
 	if errors.Is(err, db.ErrNotFound) {
-		auth.VerifyDummy(p.Password) // 用户名不存在时也耗费同样的时间
-		if s.ghostLocked(name) {
-			return nil, errf(api.CodeTooMany, "账号因多次密码错误被临时锁定，请稍后再试")
+		// 不存在的用户名走同样的流程：同样的耗时、同样的锁定规则，不能借此判断用户名是否存在
+		ok := s.ghostReserve(name)
+		auth.VerifyDummy(p.Password)
+		if !ok {
+			return nil, errAccountLocked()
 		}
-		s.ghostFail(name)
-		return nil, s.loginFailed(c, nil)
+		return nil, s.loginFailed()
 	}
 	if err != nil {
 		return nil, err
 	}
-	if u.LockedUntil > s.now().Unix() {
+	ok, err := s.DB.ReserveLoginAttempt(c.ctx, u.ID, attemptPolicy, s.now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
 		auth.VerifyDummy(p.Password)
-		return nil, errf(api.CodeTooMany, "账号因多次密码错误被临时锁定，请稍后再试")
+		return nil, errAccountLocked()
 	}
 	if auth.Verify(u.PwHash, p.Password) != nil {
-		return nil, s.loginFailed(c, u)
+		return nil, s.loginFailed()
+	}
+	// 提前记上的那次失败要清掉；用不会被取消的 ctx，客户端断开了也要清
+	if err := s.DB.RecordLoginSuccess(context.WithoutCancel(c.ctx), u.ID); err != nil {
+		return nil, err
 	}
 	if u.Disabled {
 		return nil, errf(api.CodeForbidden, "账号已被禁用")
 	}
-	s.DB.RecordLoginSuccess(c.ctx, u.ID)
 	return s.finishLogin(c, u.ID)
 }
 
-func (s *Server) loginFailed(c *call, u *db.User) error {
-	c.ss.mu.Lock()
-	c.ss.loginFails++
-	c.ss.mu.Unlock()
-	if u != nil {
-		s.DB.RecordLoginFailure(c.ctx, u.ID, maxLoginFails, s.now().Add(lockoutTime).Unix())
-	}
+func errAccountLocked() error {
+	return errf(api.CodeTooMany, "账号因多次密码错误被临时锁定，请稍后再试")
+}
+
+func (s *Server) loginFailed() error {
 	s.slowFail()
 	return errf(api.CodeUnauthorized, "用户名或密码错误")
+}
+
+// checkPassword 校验当前用户的密码（改密码、设置 PIN 时用）。和登录共用失败计数与锁定，
+// 否则已登录的会话可以借这两个接口无限次地猜密码。
+func (s *Server) checkPassword(c *call, password, wrongMsg string) error {
+	ok, err := s.DB.ReserveLoginAttempt(c.ctx, c.u.ID, attemptPolicy, s.now().Unix())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errAccountLocked()
+	}
+	if auth.Verify(c.u.PwHash, password) != nil {
+		s.slowFail()
+		return errf(api.CodeUnauthorized, "%s", wrongMsg)
+	}
+	return s.DB.ResetLoginFailures(context.WithoutCancel(c.ctx), c.u.ID)
 }
 
 func rpcResume(s *Server, c *call) (any, error) {
@@ -282,17 +305,19 @@ func rpcChangePassword(s *Server, c *call) (any, error) {
 	if err := c.bind(&p); err != nil {
 		return nil, err
 	}
-	if auth.Verify(c.u.PwHash, p.Old) != nil {
-		s.slowFail()
-		return nil, errf(api.CodeUnauthorized, "原密码不正确")
-	}
 	if err := auth.ValidatePassword(p.New); err != nil {
 		return nil, errf(api.CodeBadRequest, "%v", err)
+	}
+	if err := s.checkPassword(c, p.Old, "原密码不正确"); err != nil {
+		return nil, err
 	}
 	if err := s.DB.SetPassword(c.ctx, c.u.ID, auth.Hash(p.New)); err != nil {
 		return nil, err
 	}
-	// 改密码会吊销所有记住登录的令牌，给当前会话重新签发一个
+	// 改密码多半是怀疑密码泄露：其他设备上的会话一律退出，权限缓存里的旧令牌代数也要作废。
+	// 改密码还会吊销所有记住登录的令牌，给当前会话重新签发一个
+	s.sessions.logoutUser(c.u.ID, c.ss)
+	s.invalidateAccess()
 	return s.finishLogin(c, c.u.ID)
 }
 
@@ -304,9 +329,8 @@ func rpcSetPin(s *Server, c *call) (any, error) {
 	if err := c.bind(&p); err != nil {
 		return nil, err
 	}
-	if auth.Verify(c.u.PwHash, p.Password) != nil {
-		s.slowFail()
-		return nil, errf(api.CodeUnauthorized, "密码不正确")
+	if err := s.checkPassword(c, p.Password, "密码不正确"); err != nil {
+		return nil, err
 	}
 	hash := ""
 	if p.Pin != "" {
@@ -337,16 +361,24 @@ func rpcUnlock(s *Server, c *call) (any, error) {
 		return s.me(c), nil
 	}
 	now := s.now()
-	if c.u.PinLockedUntil > now.Unix() {
-		return nil, errf(api.CodeTooMany, "PIN 错误次数过多，已锁定 %d 分钟", (c.u.PinLockedUntil-now.Unix())/60+1)
+	// 失败次数记在数据库里（重新握手、换设备都不会清零），并且先记后校验，见 rpcLogin
+	ok, err := s.DB.ReservePinAttempt(c.ctx, c.u.ID, attemptPolicy, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if u, err := s.DB.UserByID(c.ctx, c.u.ID); err == nil && u.PinLockedUntil > now.Unix() {
+			return nil, errf(api.CodeTooMany, "PIN 错误次数过多，已锁定 %d 分钟", (u.PinLockedUntil-now.Unix())/60+1)
+		}
+		return nil, errf(api.CodeTooMany, "PIN 错误次数过多，请稍后再试")
 	}
 	if auth.Verify(c.u.PinHash, p.Pin) != nil {
-		// 失败次数记在数据库里：重新握手、换设备都不会清零
-		s.DB.RecordPinFailure(c.ctx, c.u.ID, maxLoginFails, now.Add(lockoutTime).Unix())
 		s.slowFail()
 		return nil, errf(api.CodeUnauthorized, "PIN 不正确")
 	}
-	s.DB.ResetPinFailures(c.ctx, c.u.ID)
+	if err := s.DB.ResetPinFailures(context.WithoutCancel(c.ctx), c.u.ID); err != nil {
+		return nil, err
+	}
 	c.ss.mu.Lock()
 	c.ss.unlockedUntil = now.Add(unlockDuration)
 	c.ss.mu.Unlock()
@@ -355,27 +387,31 @@ func rpcUnlock(s *Server, c *call) (any, error) {
 
 // ---- 不存在的用户名的失败计数（只在内存中） ----
 
-func (s *Server) ghostLocked(name string) bool {
-	s.ghostMu.Lock()
-	defer s.ghostMu.Unlock()
-	g := s.ghosts[strings.ToLower(name)]
-	return g != nil && s.now().Before(g.until)
-}
-
-func (s *Server) ghostFail(name string) {
+// ghostReserve 给不存在的用户名记一次失败，规则与真实账号相同（见 db.AttemptPolicy）。
+// 返回 false 表示正处于锁定期。
+func (s *Server) ghostReserve(name string) bool {
 	s.ghostMu.Lock()
 	defer s.ghostMu.Unlock()
 	if len(s.ghosts) > 10000 {
 		s.ghosts = map[string]*ghost{}
 	}
+	now := s.now()
 	key := strings.ToLower(name)
 	g := s.ghosts[key]
-	if g == nil || s.now().After(g.until.Add(lockoutTime)) {
+	if g == nil {
 		g = &ghost{}
 		s.ghosts[key] = g
 	}
-	g.fails++
-	if g.fails >= maxLoginFails {
-		g.until = s.now().Add(lockoutTime)
+	if now.Before(g.until) {
+		return false
 	}
+	if now.Sub(g.last) >= lockoutTime {
+		g.fails = 0
+	}
+	g.fails++
+	g.last = now
+	if g.fails >= maxLoginFails {
+		g.until = now.Add(lockoutTime)
+	}
+	return true
 }

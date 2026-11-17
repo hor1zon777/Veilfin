@@ -26,7 +26,7 @@ import (
 func TestAuthAndUsers(t *testing.T) {
 	e := newEnv(t)
 	admin := e.setupAdmin()
-	admin.expectCode("setup.create", map[string]string{"code": "X", "username": "b", "password": adminPass}, "forbidden")
+	admin.expectCode("setup.create", map[string]string{"username": "b", "password": adminPass}, "forbidden")
 
 	var me struct {
 		Username string `json:"username"`
@@ -84,6 +84,32 @@ func TestAuthAndUsers(t *testing.T) {
 	// 禁用账号后立即失效
 	admin.must("admin.users.update", map[string]any{"id": bobID, "disabled": true, "libraries": []int64{}}, nil)
 	other2.expectCode("home.get", nil, "unauthorized")
+}
+
+// TestSetupWindow：首次初始化不需要代码，但只能在启动后的时间窗口内完成。
+func TestSetupWindow(t *testing.T) {
+	e := newEnv(t)
+	var info struct {
+		NeedsSetup     bool `json:"needsSetup"`
+		SetupRemaining int  `json:"setupRemaining"`
+	}
+	u := e.newClient()
+	u.must("sys.info", nil, &info)
+	if !info.NeedsSetup || info.SetupRemaining < 29*60 || info.SetupRemaining > 30*60 {
+		t.Fatalf("初始化时间窗口不对: %+v", info)
+	}
+
+	late := newEnvWith(t, server.Config{SetupWindow: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	lu := late.newClient()
+	lu.must("sys.info", nil, &info)
+	if !info.NeedsSetup || info.SetupRemaining != 0 {
+		t.Fatalf("过期后应仍待初始化、剩余时间为 0: %+v", info)
+	}
+	lu.expectCode("setup.create", map[string]string{"username": "admin", "password": adminPass}, "forbidden")
+	if !late.srv.NeedsSetup() {
+		t.Fatal("过期后不应创建出管理员")
+	}
 }
 
 // TestFullLibrary：扫描、本地元数据、刮削、字幕、预览图、播放、进度、权限、PIN、编辑、CDN 视角。
@@ -779,7 +805,7 @@ func TestBackupRestore(t *testing.T) {
 	if !bytes.Equal(srv2.PublicKey(), e.srv.PublicKey()) {
 		t.Fatal("恢复后服务端公钥变了")
 	}
-	if srv2.SetupCode() != "" {
+	if srv2.NeedsSetup() {
 		t.Fatal("恢复后不应再要求初始化")
 	}
 	up2 := httptest.NewServer(srv2.Handler())

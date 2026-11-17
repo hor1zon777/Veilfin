@@ -35,14 +35,13 @@ const srv = spawn(exe, ['server', '-listen', `127.0.0.1:${port}`, '-data', join(
   env: { ...process.env, PATH: '' }, // 不提供 ffmpeg：跳过探测，测试只关心加密
 })
 let log = ''
-const setupCode = await new Promise((resolve, reject) => {
+await new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error('服务端启动超时：\n' + log)), 20000)
   const onData = (d) => {
     log += d
-    const m = log.match(/初始化代码：([0-9A-F]+)/)
-    if (m && log.includes('服务端监听')) {
+    if (log.includes('尚未初始化') && log.includes('服务端监听')) {
       clearTimeout(t)
-      resolve(m[1])
+      resolve()
     }
   }
   srv.stdout.on('data', onData)
@@ -81,11 +80,12 @@ try {
   }
 
   const info = await call('sys.info')
-  ok(info.ok && info.data.needsSetup === true, 'sys.info：服务端处于待初始化状态')
-  const bad = await call('setup.create', { code: 'WRONG', username: 'admin', password: 'password123' })
-  ok(!bad.ok, '错误的初始化代码被拒绝')
-  const setup = await call('setup.create', { code: setupCode, username: 'admin', password: 'password123' })
+  ok(info.ok && info.data.needsSetup === true && info.data.setupRemaining > 0, 'sys.info：服务端处于待初始化状态，且在初始化时间窗口内')
+  ok(!log.includes('初始化代码'), '控制台不再输出初始化代码')
+  const setup = await call('setup.create', { username: 'admin', password: 'password123' })
   ok(setup.ok && setup.data.token && setup.data.me.isAdmin, '初始化并登录为管理员')
+  const again = await call('setup.create', { username: 'admin2', password: 'password123' })
+  ok(!again.ok, '初始化完成后不能再次初始化')
 
   // 跨越多代密钥：客户端每 500 条换代，服务端回复同样会换代
   let allOk = true

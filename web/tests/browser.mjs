@@ -83,9 +83,8 @@ function start(args, waitFor) {
 }
 
 const srv = await start(['server', '-listen', `127.0.0.1:${port}`, '-data', data, '-media', media, '-web'], (log) =>
-  log.includes('服务端监听') && log.includes('初始化代码'),
+  log.includes('服务端监听') && log.includes('尚未初始化'),
 )
-const setupCode = srv.log.match(/初始化代码：([0-9A-F]+)/)[1]
 const pubkey = srv.log.match(/服务端公钥: ([A-Za-z0-9+/=]+)/)[1]
 
 const browser = await puppeteer.launch({
@@ -346,16 +345,45 @@ try {
   const ctx1 = await browser.createBrowserContext()
   const page = await newPage(ctx1, 'web')
   await page.goto(webBase + '/', { waitUntil: 'networkidle2' })
-  await page.waitForSelector('#c', { timeout: 20000 })
+  // ---- 首次设置向导：欢迎 → 管理员 → 服务器 → 媒体库 → 完成 ----
+  ok(!srv.log.includes('初始化代码'), '服务端控制台不再输出初始化代码')
+  await page.waitForSelector('#start', { timeout: 20000 })
+  await sleep(800)
+  const cd = await page.$eval('.countdown', (e) => e.textContent).catch(() => '')
+  ok(/^(29|30):\d\d$/.test(cd), `设置向导显示剩余初始化时间（${cd}）`)
   await shot(page, 'web-setup')
-  await page.type('#c', setupCode)
+  await page.click('#start')
+  await page.waitForSelector('#u')
   await page.$eval('#u', (e) => (e.value = ''))
   await page.type('#u', 'admin')
   await page.type('#p', 'admin-password-1')
   await page.type('#p2', 'admin-password-1')
+  await shot(page, 'web-setup-admin')
   await page.click('button[type=submit]')
+  await page.waitForSelector('#sn', { timeout: 20000 })
+  ok(true, '设置向导：创建管理员后进入服务器设置')
+  await page.$eval('#sn', (e) => (e.value = ''))
+  await page.type('#sn', '我的影院')
+  await page.click('.fold')
+  await sleep(700)
+  await shot(page, 'web-setup-server')
+  await page.click('#srv-next')
+  await page.waitForSelector('#libs-next', { timeout: 10000 })
+  await sleep(700)
+  const setupLibs = await page.$$eval('.lib', (l) => l.map((x) => x.textContent))
+  ok(setupLibs.length === 1 && setupLibs[0].includes('视频'), `设置向导：列出启动参数 -media 自动创建的媒体库（${setupLibs.length} 个）`)
+  await page.click('.pane > .btn') // + 再添加一个媒体库
+  await page.waitForSelector('.addbox .libform')
+  await shot(page, 'web-setup-libs')
+  await page.click('#libs-next')
+  await page.waitForSelector('#finish')
+  await sleep(700)
+  await shot(page, 'web-setup-done')
+  await page.click('#finish')
   await page.waitForSelector('.topbar', { timeout: 20000 })
-  ok(true, '网页模式：完成初始化并登录')
+  ok(true, '网页模式：完成设置向导并登录')
+  const title = await page.$eval('.topbar', (e) => e.textContent).catch(() => '')
+  ok(title.includes('我的影院'), '设置向导里填写的服务器名称已生效')
   ok(await page.evaluate(() => !!navigator.serviceWorker.controller), '网页模式：Service Worker 已接管页面')
   ok(await waitForCards(page, webBase), '网页模式：首页出现扫描到的视频')
   await sleep(1000)

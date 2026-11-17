@@ -11,6 +11,7 @@ export const state = reactive({
   me: null, // 当前用户
   serverName: 'Veilfin',
   needsSetup: false,
+  setupRemaining: 0, // 还剩多少秒可以完成初始化（0 表示时间窗口已过）
   toasts: [],
   pin: null, // { resolve } 正在请求 PIN
 })
@@ -29,6 +30,7 @@ export async function init() {
   await transport.init()
   const info = await transport.call('sys.info')
   state.needsSetup = info.needsSetup
+  state.setupRemaining = info.setupRemaining || 0
   state.serverName = info.serverName
   if (!info.needsSetup) {
     try {

@@ -55,7 +55,8 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   if (state.needsSetup && to.path !== '/setup') return '/setup'
-  if (!state.needsSetup && to.path === '/setup') return state.me ? '/' : '/login'
+  // 初始化完成后，管理员仍可以打开设置向导（从“服务器设置”这一步开始），刷新页面也不会中断向导
+  if (!state.needsSetup && to.path === '/setup' && !state.me?.isAdmin) return state.me ? '/' : '/login'
   if (!to.meta.public && !state.me) return { path: '/login', query: to.fullPath !== '/' ? { next: to.fullPath } : {} }
   if (to.meta.admin && !state.me?.isAdmin) return '/'
   if (to.path === '/login' && state.me) return '/'

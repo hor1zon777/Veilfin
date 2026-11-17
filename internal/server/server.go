@@ -10,9 +10,7 @@ package server
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,22 +56,29 @@ type Config struct {
 	// FFmpegDir 指定 ffmpeg 所在目录，为空则在 PATH 中查找。
 	FFmpegDir string
 	Version   string
+	// SetupWindow 是尚未初始化时，从启动起允许在网页上完成初始化的时长，默认 30 分钟。
+	// 超时后需要重启服务端重新计时，防止公网上的其他人在管理员之前抢先完成初始化。
+	SetupWindow time.Duration
 }
 
+// DefaultSetupWindow 是默认的初始化时间窗口。
+const DefaultSetupWindow = 30 * time.Minute
+
 type Server struct {
-	cfg       Config
-	id        ed25519.PrivateKey
-	keys      *mediacrypt.Keys
-	DB        *db.DB
-	Lib       *library.Service
-	sessions  *sessionStore
-	setupMu   sync.Mutex
-	setupCode string
-	hsMu      sync.Mutex
-	hsTokens  float64
-	hsLast    time.Time
-	ghostMu   sync.Mutex
-	ghosts    map[string]*ghost // 不存在的用户名的失败计数
+	cfg           Config
+	id            ed25519.PrivateKey
+	keys          *mediacrypt.Keys
+	DB            *db.DB
+	Lib           *library.Service
+	sessions      *sessionStore
+	setupMu       sync.Mutex
+	needsSetup    bool      // 还没有任何用户
+	setupDeadline time.Time // 超过这个时间就不再接受网页初始化
+	hsMu          sync.Mutex
+	hsTokens      float64
+	hsLast        time.Time
+	ghostMu       sync.Mutex
+	ghosts        map[string]*ghost // 不存在的用户名的失败计数
 
 	ucMu      sync.Mutex
 	userCache map[int64]*userAccess
@@ -120,18 +125,31 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if n == 0 {
-		b := make([]byte, 4)
-		rand.Read(b)
-		s.setupCode = strings.ToUpper(hex.EncodeToString(b))
+		window := cfg.SetupWindow
+		if window <= 0 {
+			window = DefaultSetupWindow
+		}
+		s.needsSetup = true
+		s.setupDeadline = s.now().Add(window)
 	}
 	return s, nil
 }
 
-// SetupCode 返回首次初始化所需的一次性代码（已初始化则为空）。
-func (s *Server) SetupCode() string {
+// NeedsSetup 表示服务端还没有初始化（没有任何用户）。
+func (s *Server) NeedsSetup() bool {
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
-	return s.setupCode
+	return s.needsSetup
+}
+
+// SetupRemaining 返回还剩多久可以在网页上完成初始化（已初始化或已过期时为 0）。
+func (s *Server) SetupRemaining() time.Duration {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	if !s.needsSetup {
+		return 0
+	}
+	return max(s.setupDeadline.Sub(s.now()), 0)
 }
 
 // PublicKey 返回服务端身份公钥。
@@ -555,7 +573,7 @@ func (s *Server) dispatch(ctx context.Context, ss *serverSession, req *api.Reque
 		}
 	}
 	if m.lvl >= user && c.u == nil {
-		if s.SetupCode() != "" {
+		if s.NeedsSetup() {
 			return failResp(rid, errf(api.CodeSetup, "服务端尚未初始化"))
 		}
 		return failResp(rid, errf(api.CodeUnauthorized, "未登录"))

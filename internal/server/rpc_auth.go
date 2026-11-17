@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -81,10 +80,12 @@ func (s *Server) me(c *call) *meResult {
 
 func rpcSysInfo(s *Server, c *call) (any, error) {
 	return map[string]any{
-		"needsSetup": s.SetupCode() != "",
-		"serverName": s.Lib.Settings(c.ctx).ServerName,
-		"version":    s.cfg.Version,
-		"loggedIn":   c.u != nil,
+		"needsSetup": s.NeedsSetup(),
+		// 剩余的初始化时间（秒），为 0 且 needsSetup 为真表示时间窗口已过，需要重启服务端
+		"setupRemaining": int(s.SetupRemaining().Seconds()),
+		"serverName":     s.Lib.Settings(c.ctx).ServerName,
+		"version":        s.cfg.Version,
+		"loggedIn":       c.u != nil,
 	}, nil
 }
 
@@ -102,20 +103,18 @@ func validUsername(name string) error {
 func rpcSetup(s *Server, c *call) (any, error) {
 	s.setupMu.Lock() // 防止并发初始化创建出多个管理员
 	defer s.setupMu.Unlock()
-	if s.setupCode == "" {
+	if !s.needsSetup {
 		return nil, errf(api.CodeForbidden, "已经初始化过了")
 	}
+	if !s.now().Before(s.setupDeadline) {
+		return nil, errf(api.CodeForbidden, "初始化时间窗口已过期：请重启服务端，然后在 %d 分钟内完成初始化", int(s.setupWindow().Minutes()))
+	}
 	var p struct {
-		Code     string `json:"code"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := c.bind(&p); err != nil {
 		return nil, err
-	}
-	if subtle.ConstantTimeCompare([]byte(strings.ToUpper(strings.TrimSpace(p.Code))), []byte(s.setupCode)) != 1 {
-		s.slowFail()
-		return nil, errf(api.CodeUnauthorized, "初始化代码不正确（见服务端启动日志）")
 	}
 	if err := validUsername(p.Username); err != nil {
 		return nil, err
@@ -127,7 +126,7 @@ func rpcSetup(s *Server, c *call) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.setupCode = ""
+	s.needsSetup = false
 	if s.cfg.InitialMedia != "" {
 		if libID, err := s.DB.CreateLibrary(c.ctx, &db.Library{Name: "视频", Kind: "home", Scraper: "none", Paths: []string{s.cfg.InitialMedia}}); err == nil {
 			s.Lib.EnqueueScan(libID, false)
@@ -135,6 +134,13 @@ func rpcSetup(s *Server, c *call) (any, error) {
 		}
 	}
 	return s.finishLogin(c, uid)
+}
+
+func (s *Server) setupWindow() time.Duration {
+	if s.cfg.SetupWindow > 0 {
+		return s.cfg.SetupWindow
+	}
+	return DefaultSetupWindow
 }
 
 func hashToken(tok string) []byte {

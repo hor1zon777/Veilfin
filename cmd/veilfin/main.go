@@ -165,8 +165,9 @@ func runServer(args []string) error {
 	log.Printf("Veilfin %s", version)
 	log.Printf("服务端公钥: %s", base64.StdEncoding.EncodeToString(pub))
 	log.Printf("公钥指纹:   %s", proto.Fingerprint(pub))
-	if code := srv.SetupCode(); code != "" {
-		log.Printf("★ 尚未初始化。首次登录时请输入初始化代码：%s", code)
+	if srv.NeedsSetup() {
+		log.Printf("★ 尚未初始化：请在 %d 分钟内用浏览器打开本服务，按设置向导创建管理员（超时后重启服务端即可重新计时）",
+			int(server.DefaultSetupWindow.Minutes()))
 	}
 	if *web {
 		log.Printf("网页模式已开启")

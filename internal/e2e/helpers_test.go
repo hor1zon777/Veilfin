@@ -91,12 +91,16 @@ func hasFFmpeg() bool {
 	return err1 == nil && err2 == nil
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWith(t, server.Config{}) }
+
+// newEnvWith 用指定的配置启动服务端（DataDir 和 Version 由测试环境填写）。
+func newEnvWith(t *testing.T, cfg server.Config) *env {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	e := &env{t: t, ctx: ctx, dataDir: t.TempDir(), mediaDir: t.TempDir()}
-	srv, err := server.New(ctx, server.Config{DataDir: e.dataDir, Version: "test"})
+	cfg.DataDir, cfg.Version = e.dataDir, "test"
+	srv, err := server.New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,8 +208,7 @@ func (e *env) setupAdmin() *user {
 	e.t.Helper()
 	u := e.newClient()
 	u.expectCode("home.get", nil, "needs_setup")
-	u.expectCode("setup.create", map[string]string{"code": "WRONG", "username": "admin", "password": adminPass}, "unauthorized")
-	u.must("setup.create", map[string]string{"code": e.srv.SetupCode(), "username": "admin", "password": adminPass}, nil)
+	u.must("setup.create", map[string]string{"username": "admin", "password": adminPass}, nil)
 	return u
 }
 

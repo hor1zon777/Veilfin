@@ -22,6 +22,7 @@ const routes = [
       { path: '', component: () => import('./views/admin/Dashboard.vue') },
       { path: 'users', component: () => import('./views/admin/Users.vue') },
       { path: 'libraries', component: () => import('./views/admin/Libraries.vue') },
+      { path: 'genres', component: () => import('./views/admin/Genres.vue') },
       { path: 'server', component: () => import('./views/admin/Server.vue') },
       { path: 'backup', component: () => import('./views/admin/Backup.vue') },
     ],

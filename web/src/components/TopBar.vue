@@ -1,8 +1,8 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useIndicator } from '../composables/indicator.js'
-import { state, rpc, lockNow, toastError, requestPin } from '../store.js'
+import { state, rpc, lockNow, toast, toastError, requestPin } from '../store.js'
 import Icon from './Icon.vue'
 
 const router = useRouter()
@@ -20,13 +20,22 @@ function onScroll() {
 function closeMenu(e) {
   if (!e.target.closest?.('.user-menu')) menu.value = false
 }
-onMounted(async () => {
-  window.addEventListener('scroll', onScroll, { passive: true })
-  document.addEventListener('click', closeMenu)
+async function loadLibs() {
   try {
     libs.value = await rpc('lib.list')
   } catch {}
+}
+onMounted(() => {
+  window.addEventListener('scroll', onScroll, { passive: true })
+  document.addEventListener('click', closeMenu)
+  loadLibs()
 })
+// 解锁 / 锁定、设置 PIN，或者从管理后台出来（可能新建 / 修改了媒体库）后，重新获取媒体库列表
+watch(() => [state.me?.id, state.me?.hasPin, state.me?.unlocked], loadLibs)
+watch(
+  () => route.path,
+  (to, from) => from?.startsWith('/admin') && !to.startsWith('/admin') && loadLibs(),
+)
 onBeforeUnmount(() => {
   window.removeEventListener('scroll', onScroll)
   document.removeEventListener('click', closeMenu)
@@ -39,6 +48,26 @@ async function logout() {
   } catch {}
   state.me = null
   router.push('/login')
+}
+
+// 一键切换受限内容封面的模糊蒙层（用户级偏好，保存在服务端，换设备也生效）。
+// 只有能看到受限内容时才显示：有受限媒体库，且没有设置 PIN 或已经解锁。
+const showBlurToggle = computed(() => libs.value.some((l) => l.restricted) && (!state.me?.hasPin || state.me.unlocked))
+let blurBusy = false
+async function toggleBlur() {
+  if (blurBusy) return
+  blurBusy = true
+  const v = !state.me.blurRestricted
+  state.me.blurRestricted = v // 先切换界面，失败再改回来
+  try {
+    state.me = await rpc('auth.setPrefs', { blurRestricted: v })
+    toast(v ? '已模糊受限内容的封面' : '已显示受限内容的封面', 'ok')
+  } catch (e) {
+    state.me.blurRestricted = !v
+    toastError(e)
+  } finally {
+    blurBusy = false
+  }
 }
 
 async function toggleLock() {
@@ -69,6 +98,11 @@ async function toggleLock() {
     <div class="spacer" />
     <router-link to="/search" class="icon-btn" title="搜索"><Icon name="search" /></router-link>
     <router-link to="/history" class="icon-btn" title="观看记录"><Icon name="history" /></router-link>
+    <button v-if="showBlurToggle" class="icon-btn blur-toggle" :title="state.me.blurRestricted ? '显示受限内容的封面' : '模糊受限内容的封面'" @click="toggleBlur">
+      <Transition name="swap" mode="out-in">
+        <Icon :key="state.me.blurRestricted ? 'b' : 's'" :name="state.me.blurRestricted ? 'eyeOff' : 'eye'" />
+      </Transition>
+    </button>
     <button v-if="state.me?.hasPin" class="icon-btn" :title="state.me.unlocked ? '锁定受限内容' : '解锁受限内容'" @click="toggleLock">
       <Transition name="swap" mode="out-in">
         <Icon :key="state.me.unlocked ? 'u' : 'l'" :name="state.me.unlocked ? 'unlock' : 'lock'" :class="{ on: state.me.unlocked }" />

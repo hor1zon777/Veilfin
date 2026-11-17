@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
+import puppeteer, { KnownDevices } from 'puppeteer-core'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..', '..')
@@ -427,6 +427,38 @@ try {
       ok(vers.length === 1 && /^dev \([0-9a-f]{7}/.test(vers[0]), `网页模式：设置页显示服务端版本号（${vers.join(' / ')}）`)
     }
   }
+  // ---- 管理后台：类型管理（重命名后列表和详情页都更新） ----
+  await page.goto(webBase + '/#/admin/genres', { waitUntil: 'networkidle2' })
+  await page.waitForSelector('table.list tbody tr')
+  const genreRows = () => page.$$eval('table.list tbody tr', (rs) => rs.map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim())))
+  ok((await genreRows()).some((r) => r[1] === '家庭' && r[2] === '1'), '类型管理：列出类型和条目数')
+  await sleep(900)
+  await shot(page, 'web-admin-genres')
+  const renameBtn = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('table.list tbody tr')].find((r) => r.children[1]?.textContent.trim() === '家庭')?.querySelector('.ops .btn'),
+  )
+  await renameBtn.click()
+  await page.waitForSelector('.dialog input.input')
+  await page.$eval('.dialog input.input', (e) => (e.value = ''))
+  await page.type('.dialog input.input', '亲情')
+  await sleep(900)
+  await shot(page, 'web-admin-genre-rename')
+  await page.click('.dialog .btn.primary')
+  const renamed = await page
+    .waitForFunction(() => !document.querySelector('.dialog') && [...document.querySelectorAll('table.list tbody td')].some((td) => td.textContent.trim() === '亲情'), { timeout: 5000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(renamed, '类型管理：重命名后列表更新')
+  await page.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  const partyCard = await page.evaluateHandle(() => [...document.querySelectorAll('.grid .card .title')].find((t) => t.textContent.includes('家庭聚会')))
+  await partyCard.click()
+  const genreChips = await page
+    .waitForFunction(() => [...document.querySelectorAll('.tagrow')].find((r) => r.textContent.includes('类型'))?.querySelector('.chips')?.textContent.trim(), { timeout: 8000 })
+    .then((h) => h.jsonValue())
+    .catch(() => '')
+  ok(genreChips === '亲情', `类型管理：详情页显示改名后的类型（${genreChips}）`)
+
   const webErrors = page.errors.filter((e) => !e.includes('favicon'))
   ok(webErrors.length === 0, '网页模式：没有控制台错误 / CSP 违规' + (webErrors.length ? '\n      ' + webErrors.join('\n      ') : ''))
 
@@ -516,6 +548,33 @@ try {
   ok(unlocked, '输入正确的 PIN 后进入受限库并看到内容')
   await shot(page, 'web-restricted-library')
 
+  // ---- 顶栏一键隐藏 / 恢复受限封面的模糊蒙层（用户级，刷新后保持） ----
+  const blurred = () => page.$$eval('.grid .card img', (is) => [is.length, is.filter((i) => i.classList.contains('blur')).length])
+  await page.waitForSelector('.grid .card img')
+  const [imgCount, blurCount] = await blurred()
+  ok(imgCount > 0 && blurCount === imgCount, `受限库的封面默认模糊（${blurCount}/${imgCount}）`)
+  await page.click('.topbar .blur-toggle')
+  const unblurred = await page
+    .waitForFunction(() => !document.querySelector('.grid .card img.blur') && document.querySelector('.topbar .blur-toggle')?.title === '模糊受限内容的封面', { timeout: 5000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(unblurred, '点击顶栏按钮后受限封面的蒙层立即消失')
+  await sleep(800)
+  await shot(page, 'web-restricted-unblurred')
+  // 服务端返回的用户信息里偏好已经改了（界面状态来自服务端的返回值）；离开再回来也保持
+  const restrictedUrl = page.url()
+  await page.goto(webBase + '/#/', { waitUntil: 'networkidle2' })
+  await page.goto(restrictedUrl, { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card img')
+  await sleep(500)
+  ok((await blurred())[1] === 0, '离开再回到受限库仍不模糊')
+  await page.click('.topbar .blur-toggle')
+  const reblurred = await page
+    .waitForFunction(() => document.querySelectorAll('.grid .card img.blur').length > 0, { timeout: 5000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(reblurred, '再次点击恢复模糊蒙层')
+
   // ---- 顶栏一键锁定 ----
   await page.click('.topbar button[title="锁定受限内容"]')
   await sleep(1200)
@@ -528,6 +587,46 @@ try {
   // 刷新后仍保持登录（令牌恢复 + 新握手）
   await page.reload({ waitUntil: 'networkidle2' })
   ok(!!(await page.$('.topbar')), '网页模式：刷新页面后保持登录')
+
+  // ---- 全屏：桌面端全屏整个播放器（保留自定义控件），移动端交给系统播放器 ----
+  const fsState = (p) =>
+    p.evaluate(() => {
+      const el = document.fullscreenElement
+      return { tag: el?.tagName || '', player: !!el?.classList.contains('player'), controls: !!document.querySelector('video')?.controls }
+    })
+  const openFs = async (p, tap) => {
+    await p.goto(webBase + '/#/play/1?t=0', { waitUntil: 'networkidle2' })
+    await p.waitForFunction(() => document.querySelector('video')?.currentTime > 0.3, { timeout: 20000 })
+    const sel = 'button[title="全屏 (F)"]'
+    if (tap) await p.tap('.player') // 先轻点一下唤出控制栏
+    else await p.mouse.move(700, 450)
+    await sleep(500)
+    await (tap ? p.tap(sel) : p.click(sel))
+    await sleep(800)
+    return fsState(p)
+  }
+  let fs = await openFs(page, false)
+  ok(fs.player && !fs.controls, `桌面端：全屏的是整个播放器，使用自定义控件（${JSON.stringify(fs)}）`)
+  await page.evaluate(() => document.exitFullscreen())
+
+  const mp = await newPage(ctx1, 'mobile')
+  await mp.emulate(KnownDevices['Pixel 5'])
+  ok(await mp.evaluate(() => matchMedia('(pointer: coarse)').matches), '移动端模拟：触屏为主的设备')
+  fs = await openFs(mp, true)
+  ok(fs.tag === 'VIDEO' && fs.controls, `移动端：全屏交给系统播放器（video 元素自身全屏并显示系统控件，${JSON.stringify(fs)}）`)
+  // 系统全屏时点击画面交给系统控件处理，不触发我们自己的播放 / 暂停（自己的处理会弹出中央反馈气泡）
+  const ourHandler = await mp.evaluate(async () => {
+    document.querySelector('video').click()
+    await new Promise((r) => setTimeout(r, 100))
+    return !!document.querySelector('.bubble')
+  })
+  ok(!ourHandler, '移动端：系统全屏时点击画面不会被自定义控件拦截')
+  await mp.evaluate(() => document.exitFullscreen())
+  await sleep(500)
+  fs = await fsState(mp)
+  ok(!fs.tag && !fs.controls, '移动端：退出系统全屏后恢复自定义控件')
+  ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
+  await mp.close()
 
   // ================= 本地客户端模式 =================
   console.log('\n[本地客户端模式] 浏览器 → 127.0.0.1 → Go 客户端加密 → 服务端')

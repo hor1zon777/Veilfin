@@ -25,6 +25,9 @@ const volume = ref(Number(localStorage.getItem('vf.volume') ?? 1))
 const muted = ref(localStorage.getItem('vf.muted') === '1')
 const rate = ref(1)
 const fullscreen = ref(false)
+// 移动端（触屏为主的设备）全屏时交给系统播放器：iOS 用 webkitEnterFullscreen，其他用 <video> 元素自身全屏 + 系统控件
+const mobile = matchMedia('(pointer: coarse)').matches
+const nativeFs = ref(false) // 正在使用系统全屏播放
 const showUI = ref(true)
 const menu = ref('') // '' | 'subs' | 'speed'
 const subIndex = ref(-1)
@@ -132,6 +135,11 @@ function onPause() {
   report()
 }
 function onEnded() {
+  // 系统全屏里看不到“下一集”倒计时，先退出全屏
+  if (nativeFs.value) {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+    else video.value?.webkitExitFullscreen?.()
+  }
   playing.value = false
   ended.value = true
   showUI.value = true
@@ -212,11 +220,61 @@ function setSub(i) {
 async function toggleFullscreen() {
   try {
     if (document.fullscreenElement) await document.exitFullscreen()
+    else if (mobile) await enterNativeFullscreen()
     else await root.value.requestFullscreen()
+  } catch {}
+}
+async function enterNativeFullscreen() {
+  const v = video.value
+  if (!v) return
+  menu.value = ''
+  if (v.requestFullscreen) {
+    // 元素自身全屏时打开 controls，由系统显示播放控件
+    v.controls = true
+    nativeFs.value = true
+    try {
+      await v.requestFullscreen({ navigationUI: 'hide' })
+    } catch (e) {
+      leaveNativeFullscreen()
+      if (!v.webkitEnterFullscreen) throw e
+      v.webkitEnterFullscreen()
+      return
+    }
+    // 横屏视频顺便锁定横屏（不支持的浏览器忽略）
+    if (v.videoWidth > v.videoHeight) screen.orientation?.lock?.('landscape').catch(() => {})
+  } else if (v.webkitEnterFullscreen) {
+    // iPhone 不支持元素全屏，只能进入系统播放器
+    v.webkitEnterFullscreen()
+  }
+}
+function leaveNativeFullscreen() {
+  if (!nativeFs.value) return
+  nativeFs.value = false
+  if (video.value) video.value.controls = false
+  try {
+    screen.orientation?.unlock?.()
   } catch {}
 }
 function onFsChange() {
   fullscreen.value = !!document.fullscreenElement
+  if (!document.fullscreenElement) leaveNativeFullscreen()
+}
+// iOS 系统播放器的进入 / 退出事件
+function onWebkitBegin() {
+  nativeFs.value = true
+  fullscreen.value = true
+}
+function onWebkitEnd() {
+  nativeFs.value = false
+  fullscreen.value = false
+  poke()
+}
+// 系统全屏时，点击 / 双击交给系统控件处理
+function onVideoClick() {
+  if (!nativeFs.value) toggle()
+}
+function onVideoDblclick() {
+  if (!nativeFs.value) toggleFullscreen()
 }
 function showFlash(s) {
   flash.value = s
@@ -371,6 +429,8 @@ onBeforeUnmount(() => {
   clearTimeout(hideTimer)
   clearTimeout(resumeTimer)
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  if (video.value?.webkitDisplayingFullscreen) video.value.webkitExitFullscreen()
+  leaveNativeFullscreen()
   document.title = prevTitle
 })
 watch(menu, (m) => m && (showUI.value = true))
@@ -396,8 +456,10 @@ watch(menu, (m) => m && (showUI.value = true))
       @playing="waiting = false"
       @canplay="waiting = false"
       @error="onError"
-      @click="toggle"
-      @dblclick="toggleFullscreen"
+      @click="onVideoClick"
+      @dblclick="onVideoDblclick"
+      @webkitbeginfullscreen="onWebkitBegin"
+      @webkitendfullscreen="onWebkitEnd"
     >
       <track v-for="(s, i) in data.subtitles" :key="i" kind="subtitles" :src="s.src" :srclang="s.lang || 'und'" :label="s.label" />
     </video>

@@ -289,7 +289,7 @@ function openRescrape() {
 .detail { position: relative; min-height: 100vh; }
 .backdrop { position: absolute; inset: 0 0 auto 0; height: 78vh; overflow: hidden; }
 /* 背景图：加载后淡入并缓慢推近，类似 iOS 的视差背景 */
-.backdrop img { width: 100%; height: 100%; object-fit: cover; opacity: 0; transform: scale(1.08); transition: opacity 1s var(--ease-out), transform 2.4s var(--spring); }
+.backdrop img { width: 100%; height: 100%; object-fit: cover; opacity: 0; transform: scale(1.08); transition: opacity 1s var(--ease-out), transform 2.4s var(--spring), filter .4s var(--ease-out); }
 .backdrop img.loaded { opacity: .55; transform: scale(1); }
 .backdrop img.blur { filter: blur(24px); }
 .shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(16,16,16,.95) 0%, rgba(16,16,16,.55) 55%, rgba(16,16,16,.2) 100%),

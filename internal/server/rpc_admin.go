@@ -41,6 +41,9 @@ func init() {
 	})
 	register("admin.settings.set", admin, rpcSettingsSet)
 	register("admin.stats", admin, rpcStats)
+	register("admin.tags.list", admin, rpcTagsList)
+	register("admin.tags.rename", admin, rpcTagsRename)
+	register("admin.tags.delete", admin, rpcTagsDelete)
 	register("items.update", admin, rpcItemUpdate)
 	register("items.unlock", admin, func(s *Server, c *call) (any, error) {
 		var p struct {
@@ -473,6 +476,87 @@ func rpcStats(s *Server, c *call) (any, error) {
 		st.Top = top
 	}
 	return st, nil
+}
+
+// ---- 类型 / 标签 / 演员管理 ----
+// 只处理当前可见的媒体库：管理员设置了 PIN 但还没解锁时，不会动到受限媒体库里的条目。
+
+func tagLibs(s *Server, c *call, kind string) ([]int64, error) {
+	if kind != "genre" && kind != "tag" && kind != "actor" {
+		return nil, errf(api.CodeBadRequest, "标签种类无效")
+	}
+	v, err := s.visibility(c)
+	if err != nil {
+		return nil, err
+	}
+	return v.visible, nil
+}
+
+func rpcTagsList(s *Server, c *call) (any, error) {
+	var p struct {
+		Kind string `json:"kind"`
+	}
+	if err := c.bind(&p); err != nil {
+		return nil, err
+	}
+	libs, err := tagLibs(s, c, p.Kind)
+	if err != nil {
+		return nil, err
+	}
+	return s.DB.TagStats(c.ctx, libs, p.Kind)
+}
+
+// rpcTagsRename 把 from 中的名称统一改成 to；to 已存在时即为合并。
+func rpcTagsRename(s *Server, c *call) (any, error) {
+	var p struct {
+		Kind string   `json:"kind"`
+		From []string `json:"from"`
+		To   string   `json:"to"`
+	}
+	if err := c.bind(&p); err != nil {
+		return nil, err
+	}
+	p.To = strings.TrimSpace(p.To)
+	if p.To == "" {
+		return nil, errf(api.CodeBadRequest, "新名称不能为空")
+	}
+	if len([]rune(p.To)) > 100 {
+		return nil, errf(api.CodeBadRequest, "名称太长")
+	}
+	if len(p.From) == 0 {
+		return nil, errf(api.CodeBadRequest, "没有选择要修改的项")
+	}
+	libs, err := tagLibs(s, c, p.Kind)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.DB.ReplaceTags(c.ctx, libs, p.Kind, p.From, p.To)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]int{"items": n}, nil
+}
+
+func rpcTagsDelete(s *Server, c *call) (any, error) {
+	var p struct {
+		Kind  string   `json:"kind"`
+		Names []string `json:"names"`
+	}
+	if err := c.bind(&p); err != nil {
+		return nil, err
+	}
+	if len(p.Names) == 0 {
+		return nil, errf(api.CodeBadRequest, "没有选择要删除的项")
+	}
+	libs, err := tagLibs(s, c, p.Kind)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.DB.ReplaceTags(c.ctx, libs, p.Kind, p.Names, "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]int{"items": n}, nil
 }
 
 // ---- 元数据编辑 ----

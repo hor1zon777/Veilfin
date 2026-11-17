@@ -60,7 +60,7 @@ docker compose logs veilfin     # 记下“服务端公钥”和“公钥指纹�
 ./veilfin-server-full-linux-amd64 server -media /path/to/videos -web
 ```
 
-内置的 ffmpeg 首次启动时会解压到数据目录的 `bin/` 下（数据目录所在分区不能禁止执行程序）。查找顺序是：`-ffmpeg` 参数 → 内置版本 → PATH。
+查找 ffmpeg 的顺序是：`-ffmpeg` 参数 → 系统里已安装的（PATH）→ 内置版本。只有系统里找不到时，内置的 ffmpeg 才会解压到数据目录的 `bin/` 下使用（数据目录所在分区不能禁止执行程序）。
 
 启动日志会打印两样东西：
 

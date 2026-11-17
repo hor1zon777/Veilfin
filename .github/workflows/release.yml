@@ -175,8 +175,8 @@ jobs:
             echo "| Windows x64 | \`veilfin-server-full-windows-amd64.exe\` |"
             echo
             ver=$(cat scripts/build-ffmpeg.sh | sed -n 's/^FFMPEG_VERSION=//p')
-            echo "内置精简编译的 FFmpeg $ver（仅包含 Veilfin 用到的解码器和滤镜），首次启动时解压到数据目录的 \`bin/\` 下；"
-            echo "用 \`-ffmpeg\` 参数可以改用其他 ffmpeg。本地客户端用不到 ffmpeg，请下载上面的普通版。"
+            echo "内置精简编译的 FFmpeg $ver（仅包含 Veilfin 用到的解码器和滤镜），系统里没有 ffmpeg 时才会解压到数据目录的 \`bin/\` 下使用；"
+            echo "系统里已安装的 ffmpeg 优先，也可以用 \`-ffmpeg\` 参数指定。本地客户端用不到 ffmpeg，请下载上面的普通版。"
             echo "FFmpeg 以 [LGPL 2.1](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html) 许可发布，源码：https://ffmpeg.org/releases/ffmpeg-$ver.tar.xz ，"
             echo "编译方式见 [scripts/build-ffmpeg.sh](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/scripts/build-ffmpeg.sh)。"
             echo "下载后可以用 \`SHA256SUMS.txt\` 校验文件完整性：\`sha256sum -c SHA256SUMS.txt --ignore-missing\`。"

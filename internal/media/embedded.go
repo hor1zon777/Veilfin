@@ -1,7 +1,7 @@
 package media
 
 // 内嵌 ffmpeg：用 -tags ffmpeg_embed 构建时，程序里带一个精简的静态 ffmpeg / ffprobe（LGPL），
-// 首次启动时解压到数据目录下，之后直接复用。普通构建不带，bundled 为空。
+// 系统里找不到 ffmpeg 时才解压到数据目录下使用，之后直接复用。普通构建不带，bundled 为空。
 //
 // 内嵌包是 tar.gz，由 scripts/build-ffmpeg.sh 生成，包含：
 //

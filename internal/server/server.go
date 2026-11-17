@@ -141,26 +141,33 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// findFFmpeg 按顺序查找 ffmpeg：-ffmpeg 指定的目录 → 程序内置的版本 → PATH。
+// findFFmpeg 按顺序查找 ffmpeg：-ffmpeg 指定的目录 → 系统里的（PATH）→ 程序内置的版本。
+// 系统里已经装了 ffmpeg 时直接用它，不会解压内置的版本。
 func findFFmpeg(cfg Config) (*media.Tools, string) {
-	dir := cfg.FFmpegDir
-	embedded := ""
-	if dir == "" && media.HasEmbedded() {
+	const noFF = "视频仍可播放，但不会生成截图、字幕和预览图。"
+	if cfg.FFmpegDir == "" && media.HasEmbedded() {
+		if ff, err := media.Find(""); err == nil {
+			log.Printf("使用系统 ffmpeg：%s", ff.FFmpeg)
+			return ff, ff.FFmpeg
+		}
 		d, err := media.ExtractEmbedded(filepath.Join(cfg.DataDir, "bin"))
 		if err != nil {
-			log.Printf("警告：%v，改为在 PATH 中查找 ffmpeg", err)
-		} else {
-			dir, embedded = d, media.EmbeddedVersion()
+			log.Printf("警告：系统里没有 ffmpeg，%v。%s", err, noFF)
+			return nil, ""
 		}
+		ff, err := media.Find(d)
+		if err != nil {
+			log.Printf("警告：%v。%s", err, noFF)
+			return nil, ""
+		}
+		v := media.EmbeddedVersion()
+		log.Printf("系统里没有 ffmpeg，使用内置 ffmpeg %s", v)
+		return ff, "内置 ffmpeg " + v + "（LGPL）"
 	}
-	ff, err := media.Find(dir)
+	ff, err := media.Find(cfg.FFmpegDir)
 	if err != nil {
-		log.Printf("警告：%v。视频仍可播放，但不会生成截图、字幕和预览图。", err)
+		log.Printf("警告：%v。%s", err, noFF)
 		return nil, ""
-	}
-	if embedded != "" && filepath.Dir(ff.FFmpeg) == dir {
-		log.Printf("使用内置 ffmpeg %s", embedded)
-		return ff, "内置 ffmpeg " + embedded + "（LGPL）"
 	}
 	return ff, ff.FFmpeg
 }

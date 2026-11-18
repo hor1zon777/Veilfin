@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/jpeg"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,6 +161,49 @@ func exerciseTools(t *testing.T, tl *Tools) {
 		got, err = tl.ExtractSubtitles(ctx, p, []int{idx[0], 99, idx[2]})
 		if err != nil || len(got) != 2 || got[idx[0]] == nil || got[idx[2]] == nil {
 			t.Fatalf("逐条提取的退路不正确: %v %d", err, len(got))
+		}
+	})
+
+	t.Run("转码", func(t *testing.T) {
+		encs := tl.H264Encoders(ctx)
+		if len(encs) == 0 {
+			t.Skip("这个 ffmpeg 没有可用的 H.264 编码器")
+		}
+		p := filepath.Join("testdata", "h264.mp4")
+		for _, enc := range encs {
+			// 12 秒的视频从 4 秒开始转：每 4 秒一个关键帧、一个片段，共两个片段
+			cmd := tl.TranscodeCmd(ctx, TranscodeOptions{Input: p, Start: 4, Encoder: enc, Width: 320, Height: 180,
+				Short: 180, Bitrate: 300_000, SegDur: 4})
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s 转码失败: %v %s", enc, err, stderr.String())
+			}
+			var boxes []string
+			for i := 0; i+8 <= len(out); {
+				size := int(uint32(out[i])<<24 | uint32(out[i+1])<<16 | uint32(out[i+2])<<8 | uint32(out[i+3]))
+				if size < 8 || i+size > len(out) {
+					t.Fatalf("%s 输出的 MP4 盒子不完整", enc)
+				}
+				boxes = append(boxes, string(out[i+4:i+8]))
+				i += size
+			}
+			moof := 0
+			for _, b := range boxes {
+				if b == "moof" {
+					moof++
+				}
+			}
+			if len(boxes) < 4 || boxes[0] != "ftyp" || boxes[1] != "moov" || moof != 2 {
+				t.Fatalf("%s 输出的分片 MP4 结构不正确: %v", enc, boxes)
+			}
+			f := filepath.Join(t.TempDir(), "out.mp4")
+			os.WriteFile(f, out, 0o644)
+			r, err := tl.Probe(ctx, f)
+			if err != nil || r.VCodec != "h264" || r.ACodec != "aac" || r.Height != 180 || math.Abs(r.Duration-8) > 0.5 {
+				t.Fatalf("%s 转码结果不正确: %+v %v", enc, r, err)
+			}
 		}
 	})
 

@@ -524,6 +524,7 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 		trick = map[string]any{"interval": tp.Interval, "cols": tp.Cols, "rows": tp.Rows, "width": tp.Width,
 			"height": tp.Height, "count": tp.Count, "sprites": sprites}
 	}
+	tc := s.transcodeInfo(c.ctx, row.Width, row.Height, row.Duration)
 	var next any
 	if p.Queue != nil {
 		// 播放队列（例如随机播放）：跳过已删除或无权访问的条目
@@ -533,7 +534,7 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 				break
 			}
 		}
-		return map[string]any{"item": d, "video": video, "subtitles": subs, "trickplay": trick, "next": next}, nil
+		return map[string]any{"item": d, "video": video, "subtitles": subs, "trickplay": trick, "next": next, "transcode": tc}, nil
 	}
 	// 如果当前目录还有其他视频，给出“下一个”，方便连续观看
 	folder := row.Folder
@@ -546,7 +547,7 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 			}
 		}
 	}
-	return map[string]any{"item": d, "video": video, "subtitles": subs, "trickplay": trick, "next": next}, nil
+	return map[string]any{"item": d, "video": video, "subtitles": subs, "trickplay": trick, "next": next, "transcode": tc}, nil
 }
 
 func rpcPlayReport(s *Server, c *call) (any, error) {

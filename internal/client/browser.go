@@ -24,8 +24,9 @@ type browser struct {
 	id string
 	tr *transport
 
-	blobMu sync.Mutex
-	blobs  map[string]*blobInfo
+	blobMu  sync.Mutex
+	blobs   map[string]*blobInfo
+	streams map[string]*streamInfo // 转码会话（HLS）的密钥和播放列表
 
 	mu       sync.Mutex
 	lastSeen time.Time

@@ -40,7 +40,7 @@ jobs:
               ;;
             windows-*)
               sudo apt-get update -qq
-              sudo apt-get install -y -qq gcc-mingw-w64-x86-64 nasm
+              sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nasm pkg-config
               sh scripts/build-ffmpeg.sh "$TARGET" "$out"
               ;;
           esac

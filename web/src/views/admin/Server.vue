@@ -6,6 +6,7 @@ import CopyField from '../../components/CopyField.vue'
 const s = ref(null)
 const ffmpeg = ref(true)
 const ffmpegInfo = ref('')
+const encoders = ref([]) // 实际可用的 H.264 编码器（服务端试编码检测）
 const busy = ref(false)
 const info = ref(null)
 const serverUrl = ref('')
@@ -27,6 +28,7 @@ onMounted(async () => {
     s.value = r.settings
     ffmpeg.value = r.ffmpeg
     ffmpegInfo.value = r.ffmpegInfo
+    encoders.value = r.encoders || []
   } catch (e) {
     toastError(e)
   }
@@ -40,6 +42,7 @@ async function save() {
       scanIntervalHours: Number(s.value.scanIntervalHours) || 0,
       metadataWorkers: Math.round(Number(s.value.metadataWorkers)) || 4,
       trickplayWorkers: Math.round(Number(s.value.trickplayWorkers)) || 4,
+      transcodeMax: Math.round(Number(s.value.transcodeMax)) || 2,
     })
     state.serverName = s.value.serverName
     if (state.me) state.me.keepPageTitle = s.value.keepPageTitle
@@ -97,6 +100,31 @@ async function save() {
       </section>
 
       <section class="card-panel d3">
+        <h2>播放时转码</h2>
+        <p v-if="ffmpeg && !encoders.length" class="warn">
+          当前使用的 ffmpeg 没有可用的 H.264 编码器，播放时不能切换画质。
+          需要转码请安装带 libx264 的 ffmpeg（或有显卡硬件编码的版本），或启动时用 -ffmpeg 指定；内置 ffmpeg 的服务端版本自带 OpenH264，也可以改用它。然后重启服务端。
+        </p>
+        <template v-if="encoders.length">
+          <label class="check"><input v-model="s.transcodeEnabled" type="checkbox" /> 允许播放时选择较低画质（服务端实时转码）</label>
+          <p class="hint sub">网络慢、或浏览器不支持原始编码（例如 HEVC）时可以转成 1080P / 720P / 480P / 360P 的 H.264 播放。转码很占 CPU，原画播放不受影响。</p>
+          <div class="field">
+            <label>编码器</label>
+            <select v-model="s.transcodeEncoder" class="input short">
+              <option value="">自动（{{ encoders[0].label }}）</option>
+              <option v-for="e in encoders" :key="e.id" :value="e.id">{{ e.label }}</option>
+            </select>
+            <span class="hint">这里只列出能用的编码器。显卡硬件编码几乎不占 CPU，转码更快；OpenH264（内置 ffmpeg 自带）画质不如 libx264，只在没有其他编码器时自动选用。</span>
+          </div>
+          <div class="field">
+            <label>同时转码的播放数上限（1–16）</label>
+            <input v-model="s.transcodeMax" class="input short" type="number" min="1" max="16" step="1" inputmode="numeric" />
+            <span class="hint">默认 2。达到上限后，新的播放只能看原画；软件编码时建议按 CPU 性能设置（一路 1080P 大约要占满 2～4 个核）。</span>
+          </div>
+        </template>
+      </section>
+
+      <section class="card-panel d4">
         <h2>TMDB（普通电影）</h2>
         <div class="field">
           <label>API Key 或读访问令牌</label>
@@ -105,7 +133,7 @@ async function save() {
         <div class="field"><label>语言</label><input v-model="s.tmdbLang" class="input short" placeholder="zh-CN" /></div>
       </section>
 
-      <section class="card-panel d4">
+      <section class="card-panel d5">
         <h2>MetaTube（番号刮削）</h2>
         <div class="field">
           <label>服务地址</label>
@@ -115,7 +143,7 @@ async function save() {
         <div class="field"><label>访问令牌（可选）</label><input v-model="s.metatubeToken" class="input" type="password" autocomplete="off" /></div>
       </section>
 
-      <section class="card-panel d5">
+      <section class="card-panel d6">
         <h2>网络</h2>
         <div class="field">
           <label>外网代理（可选）</label>

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { state, rpc, beacon, toastError } from '../store.js'
 import { fmtTime, randomId } from '../util.js'
@@ -29,7 +29,7 @@ const fullscreen = ref(false)
 const mobile = matchMedia('(pointer: coarse)').matches
 const nativeFs = ref(false) // 正在使用系统全屏播放
 const showUI = ref(true)
-const menu = ref('') // '' | 'subs' | 'speed'
+const menu = ref('') // '' | 'subs' | 'speed' | 'quality'
 const subIndex = ref(-1)
 const hover = ref(null) // { x, t }
 const ended = ref(false)
@@ -73,6 +73,156 @@ async function load() {
     if (d) dur.value = d
   } catch (e) {
     err.value = e.message
+    return
+  }
+  // 起点：链接里指定了 t（包括 t=0 表示从头播放）就用它，否则从上次看到的位置继续
+  const it = data.value.item
+  const auto = route.query.t === undefined
+  let t = auto ? it.position || 0 : Number(route.query.t) || 0
+  if (!(t > 0 && (!it.duration || t < it.duration - 5))) t = 0
+  if (t > 0 && auto) {
+    resumed.value = t
+    clearTimeout(resumeTimer)
+    resumeTimer = setTimeout(() => (resumed.value = 0), 7000)
+  }
+  await nextTick() // 等 <video> 渲染出来
+  const q = pickQuality(localStorage.getItem(QUALITY_KEY) || 'orig')
+  try {
+    await setSource(q, t, true)
+  } catch (e) {
+    // 转码不可用（例如服务端关闭了转码或已满）：退回原画
+    if (q !== 'orig') {
+      showFlash(e.message)
+      await setSource('orig', t, true)
+    } else err.value = e.message
+  }
+}
+
+// ---- 画质（原画 / 服务端实时转码） ----
+// 原画直接播放源文件；其他画质由服务端用 ffmpeg 实时转码成 HLS，hls.js 播放（iOS 17.1+ 用 ManagedMediaSource）。
+// 转码分片的时间戳就是源视频中的时间，所以进度、字幕、预览图、续播位置都不受影响。
+const QUALITY_KEY = 'vf.quality'
+const quality = ref('orig')
+const profiles = computed(() => data.value?.transcode?.profiles || [])
+const srcShort = computed(() => Math.min(data.value?.item.width || 0, data.value?.item.height || 0))
+const qualityLabel = computed(() =>
+  quality.value === 'orig' ? '原画' : profiles.value.find((p) => p.id === quality.value)?.label || quality.value,
+)
+let hls = null
+let tcSid = '' // 当前转码会话
+let pendingSeek = 0 // 新的视频源加载后要跳到的位置
+let playAfterLoad = true
+let hlsRetried = false
+let mediaRecovered = false
+let srcSeq = 0
+
+// 记住的画质在这个视频上不可用时：选不高于它的最高一档；源视频本身就不比它高时直接播原画
+function pickQuality(pref) {
+  if (pref === 'orig' || !profiles.value.length) return 'orig'
+  if (profiles.value.some((p) => p.id === pref)) return pref
+  const h = parseInt(pref, 10) || 0
+  if (srcShort.value && srcShort.value <= h) return 'orig'
+  return profiles.value.find((p) => p.height <= h)?.id || 'orig'
+}
+
+let HlsLib = null
+async function loadHls() {
+  if (!HlsLib) HlsLib = (await import('hls.js/light')).default
+  return HlsLib
+}
+
+function stopTranscode() {
+  if (hls) {
+    hls.destroy()
+    hls = null
+  }
+  if (tcSid) {
+    beacon('play.transcodeStop', { sid: tcSid })
+    tcSid = ''
+  }
+}
+
+const sidOf = (url) => decodeURIComponent(url.split('/')[2])
+
+async function setSource(q, t, play) {
+  const v = video.value
+  if (!v) return
+  const seq = ++srcSeq
+  stopTranscode()
+  pendingSeek = t
+  playAfterLoad = play
+  mediaRecovered = false
+  quality.value = q
+  if (q === 'orig') {
+    v.disableRemotePlayback = false
+    v.src = data.value.video
+    return
+  }
+  waiting.value = true
+  const r = await rpc('play.transcode', { id: data.value.item.id, quality: q, start: t, psid })
+  const Hls = await loadHls()
+  if (seq !== srcSeq || !video.value) {
+    // 等待期间又切换了画质或离开了页面
+    beacon('play.transcodeStop', { sid: sidOf(r.stream) })
+    return
+  }
+  tcSid = sidOf(r.stream)
+  if (Hls.isSupported()) {
+    // ManagedMediaSource（iOS）要求关闭隔空播放，或者另外提供可投放的地址
+    v.disableRemotePlayback = true
+    const retry = { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 8000 }
+    hls = new Hls({
+      startPosition: t,
+      enableWorker: false, // 严格 CSP 不允许 blob: Worker
+      maxBufferLength: 40,
+      backBufferLength: 90,
+      // 拖动后服务端要重新开始转码，第一个分片可能要等几秒
+      fragLoadPolicy: { default: { maxTimeToFirstByteMs: 60000, maxLoadTimeMs: 120000, timeoutRetry: retry, errorRetry: retry } },
+    })
+    hls.on(Hls.Events.ERROR, onHlsError)
+    hls.loadSource(r.stream)
+    hls.attachMedia(v)
+  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    v.src = r.stream // 不支持 MSE 的 Safari：用系统自带的 HLS 播放
+  } else {
+    throw new Error('当前浏览器不支持切换画质')
+  }
+}
+
+function onHlsError(_, d) {
+  if (!d.fatal || !hls) return
+  const Hls = HlsLib
+  const v = video.value
+  if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !mediaRecovered) {
+    mediaRecovered = true
+    hls.recoverMediaError()
+    return
+  }
+  if (d.type === Hls.ErrorTypes.NETWORK_ERROR && !hlsRetried && v) {
+    // 转码会话可能因为暂停太久被服务端清理了：重新建一个，从当前位置继续（只重试一次）
+    hlsRetried = true
+    setSource(quality.value, v.currentTime || cur.value, !v.paused).catch((e) => (err.value = '转码播放失败：' + e.message))
+    return
+  }
+  err.value = '转码播放失败（' + (d.details || d.type) + '），可以切换回原画播放'
+}
+
+async function setQuality(q) {
+  menu.value = ''
+  if (q === quality.value) return
+  const v = video.value
+  if (!v) return
+  const t = v.currentTime || cur.value
+  const play = !v.paused && !v.ended
+  localStorage.setItem(QUALITY_KEY, q)
+  err.value = ''
+  hlsRetried = false
+  try {
+    await setSource(q, t, play)
+    showFlash(q === 'orig' ? '原画' : qualityLabel.value + ' 转码播放')
+  } catch (e) {
+    toastError(e)
+    if (q !== 'orig') setSource('orig', t, play).catch(() => {})
   }
 }
 
@@ -81,19 +231,12 @@ function onLoaded() {
   if (!v) return
   v.volume = volume.value
   v.muted = muted.value
+  v.playbackRate = rate.value // 换视频源后速度会被重置
   if (isFinite(v.duration)) dur.value = v.duration
-  // 起点：链接里指定了 t（包括 t=0 表示从头播放）就用它，否则从上次看到的位置继续
-  const it = data.value.item
-  const auto = route.query.t === undefined
-  const t = auto ? it.position || 0 : Number(route.query.t) || 0
-  if (t > 0 && t < v.duration - 5) {
-    v.currentTime = t
-    if (auto) {
-      resumed.value = t
-      clearTimeout(resumeTimer)
-      resumeTimer = setTimeout(() => (resumed.value = 0), 7000)
-    }
-  }
+  const t = pendingSeek
+  pendingSeek = 0
+  if (t > 0 && Math.abs(v.currentTime - t) > 1) v.currentTime = t
+  if (!playAfterLoad) return
   v.play().catch(() => {
     // 浏览器禁止有声自动播放时，静音后再试
     v.muted = true
@@ -155,7 +298,17 @@ function onEnded() {
   }
 }
 function onError() {
-  const code = video.value?.error?.code
+  if (hls) return // 转码播放的错误由 hls.js 处理（onHlsError）
+  const v = video.value
+  if (!v?.getAttribute('src')) return // 切换视频源时清空产生的错误
+  const code = v.error?.code
+  // 浏览器不支持原画的编码（例如 HEVC）：能转码就自动转成最高的一档（不改记住的画质偏好）
+  if (code === 4 && quality.value === 'orig' && profiles.value.length) {
+    const p = profiles.value[0]
+    showFlash('浏览器不支持原画的编码，改为 ' + p.label + ' 转码播放')
+    setSource(p.id, v.currentTime || pendingSeek || cur.value, true).catch((e) => (err.value = e.message))
+    return
+  }
   err.value = code === 4 ? '浏览器不支持这个视频的格式或编码（例如 HEVC），无法播放' : '播放出错：视频数据加载失败或校验未通过'
 }
 
@@ -492,6 +645,7 @@ function cancelNext() {
 }
 function onUnload() {
   report(true)
+  stopTranscode()
 }
 
 onMounted(() => {
@@ -503,6 +657,8 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   report(true)
+  srcSeq++ // 正在创建的转码会话创建完立即关闭
+  stopTranscode()
   document.removeEventListener('keydown', onKey)
   document.removeEventListener('fullscreenchange', onFsChange)
   window.removeEventListener('pagehide', onUnload)
@@ -529,7 +685,6 @@ watch(menu, (m) => m && (showUI.value = true))
       ref="video"
       :class="{ sideways }"
       :style="{ '--rot': rot + 'deg' }"
-      :src="data.video"
       playsinline
       preload="auto"
       @loadedmetadata="onLoaded"
@@ -553,7 +708,10 @@ watch(menu, (m) => m && (showUI.value = true))
     <Transition name="fade">
     <div v-if="err" class="center-msg err">
       <p>{{ err }}</p>
-      <button class="btn" @click="back">返回</button>
+      <div class="err-actions">
+        <button v-if="quality !== 'orig'" class="btn primary" @click="setQuality('orig')">切换到原画</button>
+        <button class="btn" @click="back">返回</button>
+      </div>
     </div>
     <div v-else-if="waiting && !ended" class="center-msg"><div class="spinner" /></div>
     </Transition>
@@ -648,6 +806,19 @@ watch(menu, (m) => m && (showUI.value = true))
             <button v-for="(s, i) in data.subtitles" :key="i" :class="{ sel: subIndex === i }" @click="setSub(i)">{{ s.label }}</button>
           </div></Transition>
         </div>
+        <div v-if="profiles.length" class="pop">
+          <button class="icon-btn q-btn" :class="{ on: quality !== 'orig' }" title="画质" @click="menu = menu === 'quality' ? '' : 'quality'">
+            <Icon name="hd" /><span v-if="!mobile" class="q-label">{{ qualityLabel }}</span>
+          </button>
+          <Transition name="pop"><div v-if="menu === 'quality'" class="menu up q-menu">
+            <button :class="{ sel: quality === 'orig' }" @click="setQuality('orig')">
+              原画<span v-if="srcShort" class="q-sub">{{ srcShort }}P<template v-if="data.item.bitrate"> · {{ (data.item.bitrate / 1e6).toFixed(1) }} Mbps</template></span>
+            </button>
+            <button v-for="p in profiles" :key="p.id" :class="{ sel: quality === p.id }" @click="setQuality(p.id)">
+              {{ p.label }}<span class="q-sub">转码 · {{ (p.bitrate / 1e6).toFixed(1) }} Mbps</span>
+            </button>
+          </div></Transition>
+        </div>
         <div class="pop">
           <button class="icon-btn" title="播放速度" @click="menu = menu === 'speed' ? '' : 'speed'"><Icon name="speed" /></button>
           <Transition name="pop"><div v-if="menu === 'speed'" class="menu up">
@@ -705,6 +876,11 @@ video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .pop { position: relative; }
 .menu.up { bottom: 48px; right: 0; top: auto; min-width: 150px; }
 .menu .sel { color: var(--accent); }
+.q-btn { width: auto; min-width: 40px; padding: 0 10px; gap: 4px; border-radius: 999px; }
+.q-label { font-size: 13px; font-variant-numeric: tabular-nums; }
+.q-menu { min-width: 210px; }
+.q-sub { margin-left: auto; padding-left: 12px; font-size: 12px; opacity: .6; }
+.err-actions { display: flex; gap: 10px; }
 .on { color: var(--accent); }
 .center-msg { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; pointer-events: none; z-index: 1; }
 .center-msg.err { pointer-events: auto; background: rgba(0,0,0,.7); text-align: center; padding: 20px; }

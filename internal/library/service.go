@@ -55,6 +55,12 @@ type Settings struct {
 	MetadataWorkers int `json:"metadataWorkers"`
 	// TrickplayWorkers 是生成进度条预览图时同时运行的 ffmpeg 数（一次处理一个视频，每个 ffmpeg 截取一个时间点）
 	TrickplayWorkers int `json:"trickplayWorkers"`
+	// TranscodeEnabled 为真时允许播放时选择较低画质（服务端用 ffmpeg 实时转码）
+	TranscodeEnabled bool `json:"transcodeEnabled"`
+	// TranscodeEncoder 是转码使用的 H.264 编码器，为空表示自动选择
+	TranscodeEncoder string `json:"transcodeEncoder"`
+	// TranscodeMax 是同时转码的播放数上限
+	TranscodeMax int `json:"transcodeMax"`
 }
 
 // 元数据处理、预览图生成线程数的默认值和上限
@@ -63,10 +69,13 @@ const (
 	MaxMetadataWorkers      = 32
 	DefaultTrickplayWorkers = 4
 	MaxTrickplayWorkers     = 16
+	DefaultTranscodeMax     = 2
+	MaxTranscodeMax         = 16
 )
 
 func DefaultSettings() Settings {
-	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, AutoCheckUpdate: true, MetadataWorkers: DefaultMetadataWorkers, TrickplayWorkers: DefaultTrickplayWorkers}
+	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, AutoCheckUpdate: true, MetadataWorkers: DefaultMetadataWorkers, TrickplayWorkers: DefaultTrickplayWorkers,
+		TranscodeEnabled: true, TranscodeMax: DefaultTranscodeMax}
 }
 
 type Service struct {
@@ -189,6 +198,7 @@ func (s *Service) SaveSettings(ctx context.Context, st Settings) error {
 func (st *Settings) normalizeWorkers() {
 	st.MetadataWorkers = clampWorkers(st.MetadataWorkers, DefaultMetadataWorkers, MaxMetadataWorkers)
 	st.TrickplayWorkers = clampWorkers(st.TrickplayWorkers, DefaultTrickplayWorkers, MaxTrickplayWorkers)
+	st.TranscodeMax = clampWorkers(st.TranscodeMax, DefaultTranscodeMax, MaxTranscodeMax)
 }
 
 func clampWorkers(n, def, max int) int {

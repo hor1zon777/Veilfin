@@ -159,6 +159,7 @@ func (c *Client) Handler() http.Handler {
 	mux.HandleFunc("POST /api/rpc", c.handleRPC)
 	mux.HandleFunc("GET /api/status", c.handleStatus)
 	mux.HandleFunc("GET /b/{id}", c.handleBlob)
+	mux.HandleFunc("GET /t/{sid}/{name}", c.handleStream)
 	return c.guard(mux)
 }
 
@@ -277,13 +278,14 @@ func (c *Client) handleRPC(w http.ResponseWriter, r *http.Request) {
 func (c *Client) forgetBlobs(b *browser) {
 	b.blobMu.Lock()
 	b.blobs = map[string]*blobInfo{}
+	b.streams = nil
 	b.blobMu.Unlock()
 	c.cache.clearPrefix(b.id + "/")
 }
 
-// rewriteRefs 把响应里的所有对象引用替换成本地 URL（/b/{id}），并记住解密密钥。
+// rewriteRefs 把响应里的所有对象引用替换成本地 URL（/b/{id}），转码流引用替换成 /t/{会话ID}/index.m3u8，并记住解密密钥。
 func (c *Client) rewriteRefs(b *browser, raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 || !bytes.Contains(raw, []byte(`"$b"`)) {
+	if len(raw) == 0 || !bytes.Contains(raw, []byte(`"$b"`)) && !bytes.Contains(raw, []byte(`"$s"`)) {
 		return raw, nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -304,6 +306,12 @@ func (c *Client) rewriteRefs(b *browser, raw json.RawMessage) (json.RawMessage, 
 					ref.Size, _ = n.Int64()
 				}
 				return c.registerRef(b, &ref)
+			}
+			if id, ok := t["$s"].(string); ok {
+				ref := api.StreamRef{ID: id}
+				ref.Key, _ = t["k"].(string)
+				ref.Playlist, _ = t["p"].(string)
+				return c.registerStream(b, &ref)
 			}
 			for k, val := range t {
 				nv, err := walk(val)

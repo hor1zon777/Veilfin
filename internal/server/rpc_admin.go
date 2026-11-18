@@ -37,7 +37,7 @@ func init() {
 	})
 	register("admin.settings.get", admin, func(s *Server, c *call) (any, error) {
 		st := s.Lib.Settings(c.ctx)
-		return map[string]any{"settings": st, "ffmpeg": s.Lib.FF != nil, "ffmpegInfo": s.ffInfo}, nil
+		return map[string]any{"settings": st, "ffmpeg": s.Lib.FF != nil, "ffmpegInfo": s.ffInfo, "encoders": s.encoderInfo(c.ctx)}, nil
 	})
 	register("admin.settings.set", admin, rpcSettingsSet)
 	register("admin.stats", admin, rpcStats)

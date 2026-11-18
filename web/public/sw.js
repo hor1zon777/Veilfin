@@ -5,6 +5,7 @@
 //   - 播放请求被浏览器取消（拖动、切换视频）后，没人再需要的上游请求立即中止，不和新位置抢带宽；
 //   - 同一视频只有最新的播放请求预取：拖动时（尤其 iOS 系统播放器连续跳转、旧请求不一定会被取消）
 //     旧请求立即放掉还没用到的预取，跳转后的第一次上游请求只拉一块，开始顺序读取后再预取。
+// 另外拦截 /t/{会话ID}/{index.m3u8|init|序号}：播放时转码的 HLS 播放列表和分片，整段拉取、解密后返回。
 // 密钥和访问令牌由页面写入 IndexedDB（结构与 src/api/idb.js 一致）。
 'use strict'
 
@@ -33,6 +34,8 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url)
   if (url.origin === self.location.origin && url.pathname.startsWith('/b/')) {
     e.respondWith(serve(e.request, decodeURIComponent(url.pathname.slice(3))))
+  } else if (url.origin === self.location.origin && url.pathname.startsWith('/t/')) {
+    e.respondWith(serveStream(e.request, url.pathname))
   }
 })
 
@@ -456,4 +459,76 @@ async function serve(req, id) {
     return new Response(body, { status: 206, headers })
   }
   return new Response(body, { status: 200, headers })
+}
+
+// ---- 播放时转码（HLS） ----
+
+// 由密文大小推出明文大小（每块固定开销 OVERHEAD 字节），不合法时返回 -1
+function plainSizeOf(cs) {
+  if (cs === 0) return 0
+  const n = Math.ceil(cs / CIPHER_CHUNK)
+  const size = cs - n * OVERHEAD
+  return size > (n - 1) * CHUNK ? size : -1
+}
+
+async function serveStream(req, path) {
+  const m = /^\/t\/([^/]+)\/([^/]+)$/.exec(path)
+  if (!m) return new Response(null, { status: 404 })
+  const sid = decodeURIComponent(m[1])
+  const name = m[2]
+  const info = await idbGet('blobs', 't:' + sid)
+  if (!info) return new Response('未知转码会话，请刷新页面', { status: 404 })
+  const noStore = { 'Cache-Control': 'no-store' }
+  if (name === 'index.m3u8') {
+    return new Response(info.playlist, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', ...noStore } })
+  }
+  if (!/^(init|0|[1-9][0-9]*)$/.test(name)) return new Response(null, { status: 404 })
+  const cfg = (await idbGet('meta', 'cfg')) || {}
+  const base = cfg.apiBase || ''
+  try {
+    let res = null
+    let force = false
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      const token = await getToken(force)
+      if (!token) return new Response('无法获取访问令牌，请重新登录', { status: 403 })
+      const r = await fetch(base + '/s/' + encodeURIComponent(sid) + '/' + name, {
+        headers: { 'X-VF-T': token },
+        cache: 'no-store',
+        signal: req.signal,
+      })
+      if (r.status === 403) {
+        r.body?.cancel().catch(() => {})
+        force = true // 令牌失效或解锁状态变化，刷新后重试
+        continue
+      }
+      res = r
+    }
+    if (!res) return new Response('无权访问', { status: 403 })
+    if (!res.ok) return new Response(null, { status: res.status, headers: noStore })
+    const ct = new Uint8Array(await res.arrayBuffer())
+    const size = plainSizeOf(ct.length)
+    if (size < 0) throw new Error('分片长度不正确')
+    const id = sid + '/' + name
+    const n = Math.ceil(size / CHUNK)
+    const out = new Uint8Array(size)
+    for (let i = 0; i < n; i++) {
+      const len = Math.min(CHUNK, size - i * CHUNK)
+      const c = ct.subarray(i * CIPHER_CHUNK, i * CIPHER_CHUNK + len + OVERHEAD)
+      let pt
+      try {
+        pt = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: c.subarray(0, 12), additionalData: aadFor(id, i, n), tagLength: 128 },
+          info.key,
+          c.subarray(12),
+        )
+      } catch {
+        throw new Error('分片校验失败（数据被篡改或损坏）')
+      }
+      out.set(new Uint8Array(pt), i * CHUNK)
+    }
+    return new Response(out, { headers: { 'Content-Type': 'video/mp4', 'Content-Length': String(size), ...noStore } })
+  } catch (e) {
+    if (e?.name === 'AbortError') return new Response(null, { status: 499 })
+    return new Response(String(e.message || e), { status: 502 })
+  }
 }

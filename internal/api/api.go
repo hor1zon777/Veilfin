@@ -46,6 +46,16 @@ type BlobRef struct {
 	Mime string `json:"t"`
 }
 
+// StreamRef 是响应中对转码流（HLS）的引用。客户端把它替换成本地的播放列表地址（/t/{会话ID}/index.m3u8），
+// 并在内部记住解密密钥；分片从服务端的 /s/{会话ID}/{init|序号} 拉取、解密后交给浏览器。
+//
+//	{"$s": "会话ID", "k": "解密密钥(base64url)", "p": "播放列表（m3u8 文本，分片地址是相对路径）"}
+type StreamRef struct {
+	ID       string `json:"$s"`
+	Key      string `json:"k"`
+	Playlist string `json:"p"`
+}
+
 type LoginResult struct {
 	Token string          `json:"token"`
 	Me    json.RawMessage `json:"me"`

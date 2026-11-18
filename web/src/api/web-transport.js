@@ -179,9 +179,11 @@ export class WebTransport {
     return t.token
   }
 
-  // rewrite 把对象引用替换成 /b/{id}，并把解密密钥（不可导出的 CryptoKey）存入 IndexedDB 供 Service Worker 使用。
+  // rewrite 把对象引用替换成 /b/{id}、转码流引用替换成 /t/{会话ID}/index.m3u8，
+  // 并把解密密钥（不可导出的 CryptoKey）存入 IndexedDB 供 Service Worker 使用。
   async rewrite(data) {
     const refs = []
+    const streams = []
     const walk = (x) => {
       if (Array.isArray(x)) {
         for (let i = 0; i < x.length; i++) x[i] = walk(x[i])
@@ -191,6 +193,10 @@ export class WebTransport {
         if (typeof x.$b === 'string') {
           if (!this.registered.has(x.$b)) refs.push(x)
           return '/b/' + encodeURIComponent(x.$b)
+        }
+        if (typeof x.$s === 'string') {
+          streams.push(x)
+          return '/t/' + encodeURIComponent(x.$s) + '/index.m3u8'
         }
         for (const k of Object.keys(x)) x[k] = walk(x[k])
       }
@@ -203,8 +209,18 @@ export class WebTransport {
       )
       await idb.putMany('blobs', entries)
       for (const [id] of entries) this.registered.add(id)
-      if (!this.blobTok) await this.blobToken().catch(() => {})
     }
+    if (streams.length) {
+      // 转码流登记在同一个表里，键名加 t: 前缀（Service Worker 用它解密 /t/ 下的分片）
+      const entries = await Promise.all(
+        streams.map(async (r) => [
+          't:' + r.$s,
+          { key: await crypto.subtle.importKey('raw', b64decode(r.k), 'AES-GCM', false, ['decrypt']), playlist: r.p },
+        ]),
+      )
+      await idb.putMany('blobs', entries)
+    }
+    if ((refs.length || streams.length) && !this.blobTok) await this.blobToken().catch(() => {})
     return data
   }
 

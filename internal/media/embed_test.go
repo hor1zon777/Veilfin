@@ -46,6 +46,10 @@ func TestEmbeddedTools(t *testing.T) {
 		t.Fatal("内置 ffmpeg 不应包含 GPL / nonfree 组件")
 	}
 	t.Logf("内置 ffmpeg %s，编译参数：\n%s", EmbeddedVersion(), out)
+	// 内置版本没有 lavfi，不会试编码，直接按编码器列表判断；下面的 exerciseTools 会真的转码一次
+	if encs := tl.H264Encoders(t.Context()); len(encs) != 1 || encs[0] != "libopenh264" {
+		t.Fatalf("内置 ffmpeg 应该带 OpenH264 编码器: %v", encs)
+	}
 	exerciseTools(t, tl)
 
 	// 再次启动：直接复用；文件损坏时重新解压

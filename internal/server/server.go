@@ -3,6 +3,7 @@
 //	POST /h          握手
 //	POST /x          加密 RPC（所有业务接口都走这一个入口）
 //	GET  /m/{id}     加密对象（视频 / 图片 / 字幕 / 预览图），支持 Range，内容固定可被 CDN 缓存
+//	GET  /s/{sid}/{name}  播放时转码的加密分片（临时会话，不缓存）
 //	GET  /k          服务端身份公钥（只用于首次信任）
 //	GET  /*          网页模式的前端页面（可选，-web 开启）
 package server
@@ -30,6 +31,7 @@ import (
 	"veilfin/internal/media"
 	"veilfin/internal/mediacrypt"
 	"veilfin/internal/proto"
+	"veilfin/internal/transcode"
 	"veilfin/internal/update"
 	"veilfin/internal/webui"
 )
@@ -88,6 +90,7 @@ type Server struct {
 	keys          *mediacrypt.Keys
 	DB            *db.DB
 	Lib           *library.Service
+	tc            *transcode.Manager // 播放时转码；没有 ffmpeg 时为 nil
 	sessions      *sessionStore
 	setupMu       sync.Mutex
 	needsSetup    bool      // 还没有任何用户
@@ -139,6 +142,9 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		ghosts:    map[string]*ghost{},
 		hsTokens:  100,
 		now:       time.Now,
+	}
+	if ff != nil {
+		s.tc = transcode.NewManager(filepath.Join(cfg.DataDir, "transcode"), ff, keys)
 	}
 	s.cleanBackupDir()
 	if cfg.Executable != "" {
@@ -217,12 +223,22 @@ func (s *Server) DropSessions() { s.sessions.clear() }
 func (s *Server) Run(ctx context.Context) {
 	go s.Lib.RunScheduler(ctx)
 	go s.runUpdateChecker(ctx)
+	if s.tc != nil {
+		defer s.tc.Shutdown()
+		go s.encoders(ctx) // 提前探测可用的编码器（要试编码，需要几秒），打开播放页时不用等
+	}
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	tc := time.NewTicker(15 * time.Second)
+	defer tc.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-tc.C:
+			if s.tc != nil {
+				s.tc.GC()
+			}
 		case <-t.C:
 			s.sessions.gc(s.now())
 			s.DB.PurgeExpiredTokens(ctx)
@@ -230,13 +246,19 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-func (s *Server) Close() error { return s.DB.Close() }
+func (s *Server) Close() error {
+	if s.tc != nil {
+		s.tc.Shutdown()
+	}
+	return s.DB.Close()
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /h", s.handleHandshake)
 	mux.HandleFunc("POST /x", s.handleRPC)
 	mux.HandleFunc("GET /m/{id}", s.handleBlob)
+	mux.HandleFunc("GET /s/{sid}/{name}", s.handleStream)
 	mux.HandleFunc("GET /k", s.handlePubKey)
 	if s.cfg.Web {
 		mux.Handle("GET /", webui.Handler(s.webConfig))
@@ -266,7 +288,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func isAPIPath(p string) bool {
-	return p == "/h" || p == "/x" || p == "/k" || strings.HasPrefix(p, "/m/")
+	return p == "/h" || p == "/x" || p == "/k" || strings.HasPrefix(p, "/m/") || strings.HasPrefix(p, "/s/")
 }
 
 func (s *Server) webCSP() string {
@@ -461,17 +483,7 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request) {
 		blobError(w, http.StatusNotFound)
 		return
 	}
-	uid, gen, flags, ok := s.keys.ParseToken(r.Header.Get(api.TokenHeader), s.now())
-	if !ok {
-		blobError(w, http.StatusForbidden)
-		return
-	}
-	a, err := s.access(ctx, uid)
-	if err != nil || a.user.Disabled || gen != a.user.TokenGen || !a.allowed[b.LibraryID] {
-		blobError(w, http.StatusForbidden)
-		return
-	}
-	if a.restricted[b.LibraryID] && a.user.PinHash != "" && flags&mediacrypt.TokenUnlocked == 0 {
+	if _, ok := s.authorizeObject(r, b.LibraryID); !ok {
 		blobError(w, http.StatusForbidden)
 		return
 	}

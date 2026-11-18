@@ -8,6 +8,7 @@
 - 随机播放：按当前媒体库 / 文件夹 / 筛选条件打乱生成播放队列，播完自动接下一个
 - 元数据：NFO / JSON 附加文件 / 同目录图片 → MetaTube（番号）/ TMDB（电影）→ 手动编辑（编辑过的字段会被锁定）
 - 自动截图做封面，可以在视频里挑一帧做海报；外挂和内嵌字幕（自动识别 GBK 编码）；进度条预览图
+- 播放时切换画质：原画直接播放；网速慢或浏览器不支持原始编码（例如 HEVC）时，可以选 1080P / 720P / 480P / 360P，由服务端实时转码（内置 ffmpeg 的版本自带 OpenH264；普通版需要系统 ffmpeg 带 H.264 编码器，见下文）
 - 目录监听、定时扫描、文件夹浏览、搜索
 - 组合筛选：观看状态（未看 / 观看中 / 已看）、分辨率、时长、年份、类型、标签、演员、制作、系列
 - 加密备份 / 恢复：在管理后台创建、下载、上传备份，一键在线恢复（服务端在同一进程内自动重启）；也可以用命令行
@@ -61,6 +62,10 @@ docker compose logs veilfin     # 记下“服务端公钥”和“公钥指纹�
 ```
 
 查找 ffmpeg 的顺序是：`-ffmpeg` 参数 → 系统里已安装的（PATH）→ 内置版本。只有系统里找不到时，内置的 ffmpeg 才会解压到数据目录的 `bin/` 下使用（数据目录所在分区不能禁止执行程序）。
+
+**播放时转码**需要 ffmpeg 带 H.264 编码器：libx264（CPU），NVIDIA NVENC / Intel Quick Sync / AMD AMF / Apple VideoToolbox 硬件编码，或者 OpenH264。内置的精简 ffmpeg 为了保持 LGPL 不用 x264，带的是 OpenH264（Cisco，BSD 许可），开箱即可转码，但同样码率下画质不如 libx264；想要更好的画质，可以安装系统自带的完整 ffmpeg（例如 `apt install ffmpeg`，系统里的 ffmpeg 优先使用），或者用 `-ffmpeg` 指定。服务端启动后会逐个试编码，确认哪些编码器真的可用（硬件编码器编进了 ffmpeg，但没有显卡或驱动时不可用），自动选择时 OpenH264 排在最后。管理后台的“服务器设置 → 播放时转码”里可以开关这个功能、选择编码器、限制同时转码的播放数（默认 2 路）。
+
+转码的工作方式：ffmpeg 从播放位置开始把视频转成分片 MP4，服务端按 4 秒一段切成 HLS 分片，每段单独加密后下发（不缓存），浏览器用 hls.js 播放（iOS 17.1 以上用 ManagedMediaSource）。分片的时间戳就是源视频里的时间，所以进度、字幕、预览图和续播都不受影响。拖动到还没转码的位置时，服务端从新位置重新开始转码；转出的内容领先播放位置约 2 分钟后暂停 ffmpeg；暂停播放 1 分钟后结束 ffmpeg，20 分钟后删除临时文件（在数据目录的 `transcode/` 下）。
 
 启动日志会打印两样东西：
 
@@ -155,7 +160,7 @@ Node 只在构建前端时需要，运行时不需要。仓库里已经带有构
 
 ### 内置 ffmpeg 的版本
 
-`scripts/build-ffmpeg.sh` 从源码静态编译一个精简的 ffmpeg / ffprobe：只包含用到的解析器、解码器（H.264 / HEVC / VP8 / VP9 / MPEG-4）、MJPEG 编码器、字幕组件和三个滤镜，许可证是 LGPL 2.1，不含 GPL 组件。生成的包放到 `internal/media/ffbin/ffmpeg.tar.gz`，再加上 `-tags ffmpeg_embed` 构建即可，详见 `internal/media/ffbin/README.md`。
+`scripts/build-ffmpeg.sh` 从源码静态编译一个精简的 ffmpeg / ffprobe：只包含用到的解析器、解码器（H.264 / HEVC / VP8 / VP9 / MPEG-4）、MJPEG 编码器、字幕组件和几个滤镜，以及播放时转码用的 OpenH264（从源码静态编译）、AAC 编码器和 MP4 复用器。许可证是 LGPL 2.1，不含 GPL 组件；OpenH264 是 BSD 2-Clause。注意 Cisco 代付 H.264 专利费只适用于它官方发布的 OpenH264 二进制，不适用于从源码编译、静态链接的版本。生成的包放到 `internal/media/ffbin/ffmpeg.tar.gz`，再加上 `-tags ffmpeg_embed` 构建即可，详见 `internal/media/ffbin/README.md`。
 
 `internal/media` 的测试会用 `testdata/` 里的样片，把截图、进度条预览图、内嵌和外挂字幕都跑一遍：普通构建测试系统 ffmpeg，`-tags ffmpeg_embed` 构建测试内置版本。
 
@@ -182,7 +187,8 @@ node tests/browser.mjs                     # 真实浏览器（Edge/Chrome 无�
 
 ## 已知限制
 
-- 只支持浏览器能直接播放的格式（MP4/H.264、WebM），没有转码。HEVC 视频要看浏览器是否支持硬解。
+- 原画只支持浏览器能直接播放的格式（MP4/H.264、WebM），HEVC 视频要看浏览器是否支持硬解；不支持时，如果服务端能转码，播放页会自动改为转码播放。
+- 转码不做 HDR 色调映射，HDR 片源转码后颜色会偏淡；转码只输出 H.264 + AAC 立体声。
 - 没有电视剧的“季 / 集”层级。同一文件夹里的视频可以用“下一个”连续播放，也可以按文件夹浏览。
 - MetaTube 的接口是按它公开的 HTTP API 实现的，只用模拟服务测试过，还没有对接过真实的 MetaTube 服务。
 - 网页模式下，CDN 能看到访问时间、IP 和流量大小。如果有人知道某部公开影片的确切文件大小，理论上可以据此猜出你看的是哪部。

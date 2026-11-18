@@ -288,6 +288,73 @@ async function playbackTest(page, base, label) {
   await shot(page, `${label}-home`)
 }
 
+// 播放时切换画质（服务端实时转码成 HLS）：时间不跳、拖动、记住选择、切回原画
+async function transcodeTest(page, base, label) {
+  await page.goto(base + '/#/library/1?view=', { waitUntil: 'networkidle2' })
+  await page.waitForSelector('.grid .card')
+  const href = await page.$$eval('.grid .card', (cs) => cs.map((c) => [c.querySelector('.title').textContent, c.getAttribute('href')]))
+  const id = href.find(([t]) => t.includes('家庭聚会'))[1].split('/').pop()
+  await page.evaluate(() => localStorage.removeItem('vf.quality'))
+  await page.goto(base + `/#/play/${id}?t=30`, { waitUntil: 'networkidle2' })
+  const playing = (cond, timeout = 40000) =>
+    page
+      .waitForFunction(cond, { timeout, polling: 200 })
+      .then(() => true)
+      .catch(() => false)
+  await playing(() => {
+    const v = document.querySelector('video')
+    return v && v.currentTime > 31 && !v.paused && v.videoHeight === 720
+  })
+  const opts = await page.evaluate(async () => {
+    document.querySelector('.q-btn')?.click()
+    await new Promise((r) => setTimeout(r, 400))
+    return [...document.querySelectorAll('.q-menu button')].map((b) => b.textContent.trim())
+  })
+  ok(opts.length === 4 && opts[0].startsWith('原画') && opts[1].startsWith('720P') && opts[3].startsWith('360P'),
+    `${label}：画质菜单列出原画和 720P / 480P / 360P（${opts.join('，')}）`)
+  const before = await page.$eval('video', (v) => v.currentTime)
+  await page.evaluate(() => [...document.querySelectorAll('.q-menu button')].find((b) => b.textContent.trim().startsWith('480P')).click())
+  const switched = await playing(() => {
+    const v = document.querySelector('video')
+    return v.videoHeight === 480 && !v.paused && v.readyState >= 3 && v.src.startsWith('blob:')
+  })
+  const after = await page.$eval('video', (v) => v.currentTime)
+  ok(switched && Math.abs(after - before) < 8, `${label}：切换到 480P 转码播放，进度保持（${before.toFixed(1)}s → ${after.toFixed(1)}s）`)
+  const label480 = await page.$eval('.q-label', (e) => e.textContent).catch(() => '')
+  ok(label480 === '480P', `${label}：画质按钮显示当前画质（${label480}）`)
+
+  // 拖动：服务端从新位置重新开始转码
+  await page.$eval('video', (v) => (v.currentTime = 95))
+  const seeked = await playing(() => {
+    const v = document.querySelector('video')
+    return v.currentTime > 96 && v.currentTime < 110 && !v.paused && v.readyState >= 3 && v.videoHeight === 480
+  })
+  ok(seeked, `${label}：转码播放时拖动到 95 秒后继续播放`)
+
+  // 记住画质：重新打开时直接转码播放，并从指定位置开始
+  await page.goto(base + `/#/play/${id}?t=60`, { waitUntil: 'networkidle2' })
+  await page.reload({ waitUntil: 'networkidle2' })
+  const remembered = await playing(() => {
+    const v = document.querySelector('video')
+    return v && v.videoHeight === 480 && v.currentTime > 60 && v.currentTime < 75 && !v.paused
+  })
+  ok(remembered, `${label}：重新打开时按记住的画质（480P）从指定位置播放`)
+
+  // 切回原画
+  await page.evaluate(async () => {
+    document.querySelector('.q-btn').click()
+    await new Promise((r) => setTimeout(r, 400))
+    ;[...document.querySelectorAll('.q-menu button')].find((b) => b.textContent.trim().startsWith('原画')).click()
+  })
+  const orig = await playing(() => {
+    const v = document.querySelector('video')
+    return v.videoHeight === 720 && !v.paused && v.readyState >= 3 && v.src.includes('/b/') && v.currentTime > 60
+  })
+  ok(orig, `${label}：切回原画后继续播放`)
+  await shot(page, `${label}-transcode`)
+  await page.evaluate(() => localStorage.removeItem('vf.quality'))
+}
+
 // 续播、上次观看时间、筛选、随机播放（接在 playbackTest 之后：家庭聚会已有约 40 秒的进度）
 async function featureTest(page, base, label) {
   // 点“继续观看”里的卡片直接进入播放器，并从上次的位置继续
@@ -459,6 +526,7 @@ try {
   await shot(page, 'web-home-first')
   await playbackTest(page, webBase, 'web')
   await featureTest(page, webBase, 'web')
+  await transcodeTest(page, webBase, 'web')
 
   // ---- 卡片中间的播放键：直接播放，不经过详情页；点卡片其他位置进详情页 ----
   await page.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
@@ -833,6 +901,7 @@ try {
   ok(true, '本地模式：登录成功')
   ok(await lp.evaluate(() => !navigator.serviceWorker.controller), '本地模式：不使用 Service Worker（由 Go 客户端解密）')
   await playbackTest(lp, localBase, 'local')
+  await transcodeTest(lp, localBase, 'local')
   await lp.goto(localBase + '/#/settings', { waitUntil: 'networkidle2' })
   await lp.waitForFunction(() => [...document.querySelectorAll('.ver')].filter((v) => v.textContent.startsWith('dev')).length === 2, { timeout: 8000 }).catch(() => {})
   const lvers = await lp.$$eval('.ver', (v) => v.map((x) => x.textContent))

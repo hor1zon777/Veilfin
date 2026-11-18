@@ -2,7 +2,7 @@
 // 用法：node tests/crypto-interop.mjs
 // 会自动编译 Go 服务端、生成测试视频、启动服务端，然后用 JS 实现完成全部流程。
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,9 @@ mkdirSync(media)
 const video = new Uint8Array(2.5 * 1024 * 1024)
 for (let i = 0; i < video.length; i += 65536) crypto.getRandomValues(video.subarray(i, Math.min(i + 65536, video.length)))
 writeFileSync(join(media, 'interop.mp4'), video)
+// 服务端会跳过刚修改过（可能正在复制）的视频：把修改时间调到一小时前
+const old = new Date(Date.now() - 3600 * 1000)
+utimesSync(join(media, 'interop.mp4'), old, old)
 
 const srv = spawn(exe, ['server', '-listen', `127.0.0.1:${port}`, '-data', join(work, 'data'), '-media', media], {
   env: { ...process.env, PATH: '' }, // 不提供 ffmpeg：跳过探测，测试只关心加密

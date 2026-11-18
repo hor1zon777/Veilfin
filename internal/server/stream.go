@@ -163,6 +163,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, transcode.ErrNotFound):
 			blobError(w, http.StatusNotFound)
+		case errors.Is(err, transcode.ErrSuperseded):
+			blobError(w, http.StatusConflict)
 		case r.Context().Err() != nil:
 			// 客户端已经放弃（拖动到别处）
 		default:

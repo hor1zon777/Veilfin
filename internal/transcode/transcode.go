@@ -48,6 +48,9 @@ const (
 var (
 	ErrNotFound = errors.New("转码会话不存在或已过期")
 	ErrBusy     = errors.New("转码任务已满")
+	// ErrSuperseded：同一会话来了更新的分片请求（通常是拖动），旧请求不再等待。
+	// 只有最新的请求能重新开始转码，否则两个请求会轮流结束对方的 ffmpeg、从自己要的位置重启，无限循环。
+	ErrSuperseded = errors.New("已有更新的分片请求")
 )
 
 // Profile 是一档转码画质。
@@ -147,6 +150,8 @@ type Session struct {
 	have       map[int]bool
 	run        *run
 	lastReq    int
+	reqSeq     uint64 // 分片请求的序号：只有最新的请求能重新开始转码
+	runs       int    // 启动过的 ffmpeg 次数（测试用）
 	lastAccess time.Time
 	changed    chan struct{} // 状态变化时关闭并换新，用来唤醒等待者
 	closed     bool
@@ -377,6 +382,8 @@ func (s *Session) Segment(ctx context.Context, name string) ([]byte, error) {
 	if err != nil || n < 0 || n >= s.nseg || strconv.Itoa(n) != name {
 		return nil, ErrNotFound
 	}
+	s.reqSeq++
+	my := s.reqSeq
 	if n != s.lastReq {
 		s.lastReq = n
 		s.notify() // 唤醒因领先太多而暂停的读取
@@ -385,14 +392,17 @@ func (s *Session) Segment(ctx context.Context, name string) ([]byte, error) {
 		if s.closed {
 			return nil, ErrNotFound
 		}
+		latest := my == s.reqSeq
 		if s.have[n] {
 			b, err := os.ReadFile(s.segPath(n))
 			if err != nil {
 				delete(s.have, n)
 				continue
 			}
-			s.prune(n)
-			s.prefetch(n)
+			if latest {
+				s.prune(n)
+				s.prefetch(n)
+			}
 			return b, nil
 		}
 		r := s.run
@@ -403,6 +413,8 @@ func (s *Session) Segment(ctx context.Context, name string) ([]byte, error) {
 			return nil, r.err // 就是从这里开始的转码失败了，不再反复重试
 		case r != nil && r.done && r.eof && r.next <= n:
 			return nil, ErrNotFound // 已经转到结尾，没有这个分片（视频实际比记录的时长短）
+		case !latest:
+			return nil, ErrSuperseded
 		default:
 			s.startRun(n)
 		}
@@ -462,6 +474,7 @@ func (s *Session) startRun(n int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &run{start: n, next: n, cancel: cancel}
 	s.run = r
+	s.runs++
 	s.notify()
 	go s.transcode(ctx, r)
 }

@@ -289,6 +289,24 @@ async function playbackTest(page, base, label) {
 }
 
 // 播放时切换画质（服务端实时转码成 HLS）：时间不跳、拖动、记住选择、切回原画
+// 失败时打印播放器现场，方便定位
+async function dumpPlayer(page) {
+  const st = await page
+    .evaluate(() => {
+      const v = document.querySelector('video')
+      const buf = []
+      for (let i = 0; v && i < v.buffered.length; i++) buf.push([v.buffered.start(i).toFixed(1), v.buffered.end(i).toFixed(1)])
+      return {
+        t: v?.currentTime, rs: v?.readyState, paused: v?.paused, seeking: v?.seeking, h: v?.videoHeight, src: v?.src,
+        buf, err: document.querySelector('.center-msg.err')?.textContent?.trim(), url: location.href,
+      }
+    })
+    .catch((e) => String(e))
+  console.log('      播放器状态：', JSON.stringify(st))
+  console.log('      页面错误：', JSON.stringify(page.errors.slice(-5)))
+  console.log('      服务端日志末尾：\n' + srvLog.split('\n').slice(-40).join('\n'))
+}
+
 async function transcodeTest(page, base, label) {
   await page.goto(base + '/#/library/1?view=', { waitUntil: 'networkidle2' })
   await page.waitForSelector('.grid .card')
@@ -329,7 +347,7 @@ async function transcodeTest(page, base, label) {
     const v = document.querySelector('video')
     return v.currentTime > 96 && v.currentTime < 110 && !v.paused && v.readyState >= 3 && v.videoHeight === 480
   })
-  ok(seeked, `${label}：转码播放时拖动到 95 秒后继续播放`)
+  if (!ok(seeked, `${label}：转码播放时拖动到 95 秒后继续播放`)) await dumpPlayer(page)
 
   // 记住画质：重新打开时直接转码播放，并从指定位置开始
   await page.goto(base + `/#/play/${id}?t=60`, { waitUntil: 'networkidle2' })
@@ -338,7 +356,7 @@ async function transcodeTest(page, base, label) {
     const v = document.querySelector('video')
     return v && v.videoHeight === 480 && v.currentTime > 60 && v.currentTime < 75 && !v.paused
   })
-  ok(remembered, `${label}：重新打开时按记住的画质（480P）从指定位置播放`)
+  if (!ok(remembered, `${label}：重新打开时按记住的画质（480P）从指定位置播放`)) await dumpPlayer(page)
 
   // 切回原画
   await page.evaluate(async () => {

@@ -25,7 +25,7 @@ const volume = ref(Number(localStorage.getItem('vf.volume') ?? 1))
 const muted = ref(localStorage.getItem('vf.muted') === '1')
 const rate = ref(1)
 const fullscreen = ref(false)
-// 移动端（触屏为主的设备）全屏时交给系统播放器：iOS 用 webkitEnterFullscreen，其他用 <video> 元素自身全屏 + 系统控件
+// 移动端（触屏为主的设备）全屏时交给系统播放器：iOS / iPadOS 用 webkitEnterFullscreen，其他用 <video> 元素自身全屏 + 系统控件
 const mobile = matchMedia('(pointer: coarse)').matches
 const nativeFs = ref(false) // 正在使用系统全屏播放
 const showUI = ref(true)
@@ -223,9 +223,12 @@ function setSub(i) {
   for (let j = 0; j < tracks.length; j++) tracks[j].mode = j === i ? 'showing' : 'disabled'
   menu.value = ''
 }
+// 注意：进入全屏的调用必须在点击事件里同步发出，中间不能有 await，
+// 否则 iOS 认为已经不是用户操作，直接忽略全屏请求
 async function toggleFullscreen() {
   try {
     if (document.fullscreenElement) await document.exitFullscreen()
+    else if (video.value?.webkitDisplayingFullscreen) video.value.webkitExitFullscreen()
     else if (mobile) await enterNativeFullscreen()
     else await root.value.requestFullscreen()
   } catch {}
@@ -234,7 +237,13 @@ async function enterNativeFullscreen() {
   const v = video.value
   if (!v) return
   menu.value = ''
-  if (v.requestFullscreen) {
+  if (v.webkitEnterFullscreen) {
+    // iOS / iPadOS（包括 iOS 上的 Chrome 等，内核都是 WebKit）：直接进入系统播放器。
+    // 不走 requestFullscreen：iPhone 上它要么失败（失败后再回退时已经不算用户操作，不会生效），
+    // 要么进入的是元素全屏，系统控件的进度条拖不动
+    if (v.readyState < 1) return showFlash('视频还没加载好，请稍后再试') // 元数据未加载时调用会报错
+    v.webkitEnterFullscreen()
+  } else if (v.requestFullscreen) {
     // 元素自身全屏时打开 controls，由系统显示播放控件
     v.controls = true
     nativeFs.value = true
@@ -242,15 +251,10 @@ async function enterNativeFullscreen() {
       await v.requestFullscreen({ navigationUI: 'hide' })
     } catch (e) {
       leaveNativeFullscreen()
-      if (!v.webkitEnterFullscreen) throw e
-      v.webkitEnterFullscreen()
-      return
+      throw e
     }
     // 横屏视频顺便锁定横屏（不支持的浏览器忽略）
     if (v.videoWidth > v.videoHeight) screen.orientation?.lock?.('landscape').catch(() => {})
-  } else if (v.webkitEnterFullscreen) {
-    // iPhone 不支持元素全屏，只能进入系统播放器
-    v.webkitEnterFullscreen()
   }
 }
 function leaveNativeFullscreen() {

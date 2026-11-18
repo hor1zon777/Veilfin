@@ -895,6 +895,31 @@ try {
   ok(!(await st()).paused, '移动端：再点中央按钮继续播放')
   await sleep(3800)
   ok((await st()).hidden, '移动端：播放中 3 秒后控制栏自动收起')
+
+  // ---- 移动端卡片：没选中时点中间进详情页；点一下选中（iOS 会保持悬停状态、显示播放键）后再点播放键直接播放 ----
+  {
+    const openLib = async () => {
+      await mp.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
+      await mp.waitForSelector('.grid .card .play')
+      await sleep(300)
+      return mp.$eval('.grid .card .play', (b) => {
+        const r = b.getBoundingClientRect()
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+      })
+    }
+    let at = await openLib()
+    await mp.touchscreen.tap(at.x, at.y)
+    const toItem = await mp.waitForFunction(() => location.hash.startsWith('#/item/'), { timeout: 5000 }).then(() => true).catch(() => false)
+    ok(toItem, '移动端：卡片没选中时点中间（播放键还没显示）进入详情页')
+    at = await openLib()
+    // 模拟“已选中”：卡片处于悬停状态，播放键已显示
+    await mp.mouse.move(at.x, at.y)
+    await sleep(400)
+    const shown = await mp.$eval('.grid .card', (c) => c.matches(':hover') && getComputedStyle(c.querySelector('.hover')).opacity > 0.9)
+    await mp.touchscreen.tap(at.x, at.y)
+    const toPlay = await mp.waitForFunction(() => location.hash.startsWith('#/play/'), { timeout: 5000 }).then(() => true).catch(() => false)
+    ok(shown && toPlay, `移动端：卡片选中后点播放键直接进入播放页（播放键已显示 ${shown}，进入播放页 ${toPlay}）`)
+  }
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
 

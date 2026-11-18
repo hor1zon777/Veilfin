@@ -15,8 +15,20 @@ const props = defineProps({
 })
 
 const router = useRouter()
-// 点中间的播放键直接播放（从上次看到的位置继续），点卡片其他位置进详情页
-function playNow() {
+// 点中间的播放键直接播放（从上次看到的位置继续），点卡片其他位置进详情页。
+// 触屏没有真正的悬停：卡片没选中时播放键看不见，这时点到播放键的位置按点卡片处理（进详情页）；
+// 点一下卡片选中后（iOS 等会保持悬停状态，播放键显示出来），再点播放键直接播放。
+// 是否已选中要在按下时判断：松手后浏览器才会把悬停状态设到这张卡片上
+let armed = true
+function onPlayDown(e) {
+  armed = e.pointerType === 'mouse' || e.pointerType === 'pen' || !!e.currentTarget.closest('.card')?.matches(':hover')
+}
+function onPlayClick(e) {
+  const go = armed
+  armed = true // 键盘回车触发的点击没有 pointerdown，按可播放处理
+  if (!go) return // 交给外层链接进详情页
+  e.preventDefault()
+  e.stopPropagation()
   router.push(`/play/${props.item.id}`)
 }
 
@@ -53,7 +65,7 @@ const delay = computed(() => ({ '--i': Math.min(props.index % 60, 14) }))
       <span v-if="shape === 'thumb' && resolutionLabel(item.width, item.height)" class="res">{{ resolutionLabel(item.width, item.height) }}</span>
       <div v-if="showProgress && pct" class="progress"><div :style="{ transform: `scaleX(${pct / 100})` }" /></div>
       <div class="hover">
-        <button type="button" class="play" title="播放" aria-label="播放" @click.prevent.stop="playNow"><Icon name="play" :size="30" /></button>
+        <button type="button" class="play" title="播放" aria-label="播放" @pointerdown="onPlayDown" @click="onPlayClick"><Icon name="play" :size="30" /></button>
       </div>
     </div>
     <div class="title" :title="item.title">{{ item.title }}</div>
@@ -83,12 +95,11 @@ const delay = computed(() => ({ '--i': Math.min(props.index % 60, 14) }))
 .hover { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.28); opacity: 0; transition: opacity .25s var(--ease-out); }
 .card:hover .hover { opacity: 1; }
 .play { width: 52px; height: 52px; border-radius: 50%; background: rgba(82,181,75,.9); display: flex; align-items: center; justify-content: center; color: #fff;
-  border: 0; padding: 0; cursor: pointer; pointer-events: none;
+  border: 0; padding: 0; cursor: pointer;
   transform: scale(.6); transition: transform .45s var(--spring-bouncy), background-color .2s, box-shadow .3s; box-shadow: 0 6px 20px rgba(0,0,0,.4); backdrop-filter: blur(6px); }
 .card:hover .play { transform: scale(1); }
-/* 只有能悬停的设备（鼠标）才能点播放键；触屏上播放键看不见，点卡片任何位置都进详情页 */
+/* 触屏上卡片没选中时点播放键的位置也进详情页，由 onPlayDown / onPlayClick 判断 */
 @media (hover: hover) {
-  .card:hover .play { pointer-events: auto; }
   .card:hover .play:hover { transform: scale(1.12); background: var(--accent); box-shadow: 0 0 0 6px rgba(82,181,75,.25), 0 8px 24px rgba(0,0,0,.5); }
   .card:hover .play:active { transform: scale(.92); transition-duration: .08s; }
 }

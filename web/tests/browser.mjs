@@ -197,6 +197,29 @@ async function playbackTest(page, base, label) {
     .catch(() => false)
   ok(reseeked, `${label}：连续快速拖动后在最后的位置继续播放`)
 
+  // 点击进度条：松开时只跳转一次，并跳到点击的位置
+  {
+    await page.evaluate(() => {
+      const v = document.querySelector('video')
+      window.__seeks = 0
+      v.addEventListener('seeking', () => window.__seeks++)
+    })
+    const box = await (await page.$('.bar')).boundingBox()
+    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height / 2)
+    const ratio = await page
+      .waitForFunction(
+        () => {
+          const v = document.querySelector('video')
+          return !v.seeking && v.readyState >= 3 && v.currentTime / v.duration
+        },
+        { timeout: 30000 },
+      )
+      .then((h) => h.jsonValue())
+      .catch(() => 0)
+    const seeks = await page.evaluate(() => window.__seeks)
+    ok(ratio > 0.28 && ratio < 0.36 && seeks === 1, `${label}：点击进度条只跳转一次（${seeks} 次），到达 ${(ratio * 100).toFixed(1)}%`)
+  }
+
   // 字幕：启用后应加载出字幕内容
   const cue = await page.evaluate(async () => {
     const v = document.querySelector('video')

@@ -2,7 +2,9 @@
 // 支持 Range 请求和流式输出，拖动进度条时只拉取需要的块：
 //   - 边收边解密：上游每到一整块就解密交出，拖动后不必等整组下载完；
 //   - 顺序播放时保持两个上游请求交替进行，提前拉取后面约 16 MiB，掩盖往返延迟；
-//   - 播放请求被浏览器取消（拖动、切换视频）后，没人再需要的上游请求立即中止，不和新位置抢带宽。
+//   - 播放请求被浏览器取消（拖动、切换视频）后，没人再需要的上游请求立即中止，不和新位置抢带宽；
+//   - 同一视频只有最新的播放请求预取：拖动时（尤其 iOS 系统播放器连续跳转、旧请求不一定会被取消）
+//     旧请求立即放掉还没用到的预取，跳转后的第一次上游请求只拉一块，开始顺序读取后再预取。
 // 密钥和访问令牌由页面写入 IndexedDB（结构与 src/api/idb.js 一致）。
 'use strict'
 
@@ -12,6 +14,7 @@ const CIPHER_CHUNK = CHUNK + OVERHEAD
 const GROUP = 4 // 每次向上游拉取的块数（按 4 块对齐，便于合并重复请求，也利于 CDN 分段缓存）
 const AHEAD = 16 // 顺序播放时预取到当前位置之后的块数（约 16 MiB）
 const MAX_INFLIGHT = 2 // 每个播放请求同时进行的上游请求数
+const FIRST = 1 // 新播放请求（跳转）第一次向上游拉取的块数
 const CACHE_LIMIT = 96 // 解密块缓存（约 96 MiB）
 
 self.addEventListener('install', () => self.skipWaiting())
@@ -21,6 +24,7 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()))
 self.addEventListener('message', (e) => {
   if (e.data?.type === 'clear-cache') {
     cache.clear()
+    tokenMemo = null
     for (const job of new Set(pending.values())) job.cancel()
   }
 })
@@ -89,11 +93,19 @@ async function askClientForToken(force) {
   return null
 }
 
+// 读到的令牌在内存里留一份，每次上游请求不必再读 IndexedDB
+let tokenMemo = null
+const fresh = (t) => t && t.exp * 1000 - Date.now() > 60 * 1000
 async function getToken(force) {
   if (!force) {
+    if (fresh(tokenMemo)) return tokenMemo.token
     const t = await idbGet('meta', 'token')
-    if (t && t.exp * 1000 - Date.now() > 60 * 1000) return t.token
+    if (fresh(t)) {
+      tokenMemo = t
+      return t.token
+    }
   }
+  tokenMemo = null
   return askClientForToken(force)
 }
 
@@ -238,11 +250,14 @@ class Job {
     } finally {
       this.done = true
       for (let k = first; k <= last; k++) this.unregister(k)
-      // 让持有它的播放请求接着往后预取
+      // 让持有它的播放请求接着往后预取（pump 内部只允许最新的播放请求预取）
       for (const s of this.holders) s.pump()
     }
   }
 }
+
+// 每个视频当前打开的播放请求，用来判断谁是最新的
+const streams = new Map() // id → Set<Stream>
 
 // Stream 是浏览器发来的一次 /b/ 请求（明文范围到 end 为止）。
 class Stream {
@@ -253,6 +268,29 @@ class Stream {
     this.closed = false
     this.served = 0 // 已交出的块数
     this.pos = -1 // 最近交出的块序号
+    this.want = null // 正在等待的上游请求（不是预取）
+    this.claimed = false
+    let set = streams.get(id)
+    if (!set) streams.set(id, (set = new Set()))
+    set.add(this)
+  }
+
+  // 新的播放请求（通常是拖动）认领了自己要的第一块之后，其他请求放掉还没用到的预取，把带宽让给新位置。
+  // 先认领再让：要的块正好在别人的预取里时（例如前进 10 秒），直接接着用，不会被中止后重拉
+  claim() {
+    if (this.claimed) return
+    this.claimed = true
+    for (const s of streams.get(this.id) || []) if (s !== this) s.yieldPrefetch()
+  }
+
+  newest() {
+    let last = null
+    for (const s of streams.get(this.id) || []) last = s
+    return last === this
+  }
+
+  yieldPrefetch() {
+    for (const job of [...this.held]) if (job !== this.want) this.release(job)
   }
 
   hold(job) {
@@ -272,11 +310,16 @@ class Stream {
     if (this.closed) return
     this.closed = true
     for (const job of [...this.held]) this.release(job)
+    const set = streams.get(this.id)
+    set?.delete(this)
+    if (set && !set.size) streams.delete(this.id)
   }
 
-  // 从 idx 开始发起上游请求：到对齐的组尾为止，遇到已缓存或正在拉取的块就停下，不重复拉取
+  // 从 idx 开始发起上游请求：到对齐的组尾为止，遇到已缓存或正在拉取的块就停下，不重复拉取。
+  // 还没交出过数据的新请求（跳转）只拉 FIRST 块：拖动中途的位置很快会被放弃，少浪费带宽
   start(idx) {
-    const end = Math.min(Math.floor(idx / GROUP) * GROUP + GROUP - 1, this.lastIdx, numChunks(this.info) - 1)
+    let end = Math.min(Math.floor(idx / GROUP) * GROUP + GROUP - 1, this.lastIdx, numChunks(this.info) - 1)
+    if (this.served === 0) end = Math.min(end, idx + FIRST - 1)
     let last = idx
     while (last < end && !cache.has(this.id + ':' + (last + 1)) && !pending.has(this.id + ':' + (last + 1))) last++
     return new Job(this.id, this.info, idx, last, this.base)
@@ -286,15 +329,22 @@ class Stream {
     const k = this.id + ':' + idx
     for (let attempt = 0; ; attempt++) {
       const c = cacheGet(k)
-      if (c) return c
+      if (c) {
+        this.claim()
+        return c
+      }
       if (this.closed) throw new Error('请求已取消')
       const job = pending.get(k) || this.start(idx)
       this.hold(job)
+      this.want = job
+      this.claim()
       try {
         return await job.waits.get(idx).promise
       } catch (e) {
         // 别的播放请求放弃了这个上游请求，或网络中断：重试一次
         if (this.closed || attempt >= 1) throw e
+      } finally {
+        if (this.want === job) this.want = null
       }
     }
   }
@@ -307,9 +357,10 @@ class Stream {
     this.pump()
   }
 
-  // 顺序读取（已交出两块以上）时，在当前位置之后 AHEAD 块内保持最多 MAX_INFLIGHT 个上游请求
+  // 浏览器开始读取（已交出数据）后，在当前位置之后 AHEAD 块内保持最多 MAX_INFLIGHT 个上游请求。
+  // 只有这个视频最新的播放请求预取，旧请求只按需拉取
   pump() {
-    if (this.closed || this.served < 2) return
+    if (this.closed || this.served < 1 || !this.newest()) return
     let inflight = 0
     for (const job of this.held) if (!job.done) inflight++
     const limit = Math.min(this.pos + AHEAD, this.lastIdx)

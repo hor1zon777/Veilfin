@@ -114,7 +114,7 @@ function report(final) {
 function onTime() {
   const v = video.value
   if (!v) return // 卸载过程中仍可能触发事件
-  cur.value = v.currentTime
+  if (!dragging) cur.value = v.currentTime // 拖动进度条时显示的是手指 / 鼠标的位置
   if (playing.value && Date.now() - lastReport > 10000) report()
 }
 function onProgress() {
@@ -186,11 +186,15 @@ function toggle(feedback = true) {
     if (feedback) showBubble('pause')
   }
 }
-function seek(t) {
+// fast 为 true 时跳到附近的关键帧（支持 fastSeek 的浏览器，如 iOS / Safari）：
+// 不用先下载、解码关键帧到目标时间之间的数据，点进度条后起播更快
+function seek(t, fast = false) {
   const v = video.value
   if (!v) return
-  v.currentTime = Math.max(0, Math.min(t, (v.duration || dur.value) - 0.5))
-  cur.value = v.currentTime
+  t = Math.max(0, Math.min(t, (v.duration || dur.value) - 0.5))
+  if (fast && v.fastSeek) v.fastSeek(t)
+  else v.currentTime = t
+  cur.value = t
 }
 function skip(d) {
   if (!video.value) return
@@ -319,12 +323,17 @@ function barTime(e) {
   const x = Math.max(0, Math.min(e.clientX - r.left, r.width))
   return { x, t: (x / r.width) * dur.value, w: r.width }
 }
+// 按下和拖动时只移动进度条显示，松开时才真正跳转一次：
+// 每次跳转都要重新向服务端请求数据，点一下就跳两次、拖动中途跳转都会白白占用带宽
 let dragging = false
 function onBarDown(e) {
   dragging = true
-  seek(barTime(e).t)
+  const b = barTime(e)
+  cur.value = b.t
+  hover.value = b
   window.addEventListener('pointermove', onBarDrag)
   window.addEventListener('pointerup', onBarUp, { once: true })
+  window.addEventListener('pointercancel', onBarUp, { once: true })
 }
 function onBarDrag(e) {
   if (dragging) {
@@ -334,9 +343,14 @@ function onBarDrag(e) {
   }
 }
 function onBarUp(e) {
+  if (!dragging) return
   dragging = false
   window.removeEventListener('pointermove', onBarDrag)
-  if (bar.value) seek(barTime(e).t)
+  window.removeEventListener('pointerup', onBarUp)
+  window.removeEventListener('pointercancel', onBarUp)
+  if (e.type === 'pointercancel') cur.value = video.value?.currentTime || 0
+  else if (bar.value) seek(barTime(e).t, mobile) // 移动端点得不精确，跳到附近关键帧换取更快起播
+  if (mobile) hover.value = null
 }
 function onBarMove(e) {
   hover.value = barTime(e)

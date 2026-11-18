@@ -167,6 +167,24 @@ async function playbackTest(page, base, label) {
     .catch(() => false)
   ok(seeked, `${label}：拖动到 80 秒后继续播放`)
 
+  // 连续快速拖动：前几次的上游请求被中止，最后的位置仍能正常播放
+  await page.evaluate(async () => {
+    const v = document.querySelector('video')
+    for (const t of [10, 95, 30, 70, 20, 100]) {
+      v.currentTime = t
+      await new Promise((r) => setTimeout(r, 60))
+    }
+    v.currentTime = 55
+  })
+  const reseeked = await page
+    .waitForFunction(() => {
+      const v = document.querySelector('video')
+      return v.currentTime > 56 && v.currentTime < 70 && !v.paused && v.readyState >= 3
+    }, { timeout: 30000 })
+    .then(() => true)
+    .catch(() => false)
+  ok(reseeked, `${label}：连续快速拖动后在最后的位置继续播放`)
+
   // 字幕：启用后应加载出字幕内容
   const cue = await page.evaluate(async () => {
     const v = document.querySelector('video')
@@ -190,7 +208,8 @@ async function playbackTest(page, base, label) {
     await sleep(600)
     tp = await page.evaluate(() => {
       const t = document.querySelector('.tip .thumb')
-      return !!t && getComputedStyle(t).backgroundImage.includes('/b/')
+      const bg = t && getComputedStyle(t).backgroundImage
+      return !!bg && (bg.includes('/b/') || bg.includes('blob:'))
     })
     if (!tp) await sleep(1500)
   }
@@ -207,6 +226,18 @@ async function playbackTest(page, base, label) {
         }),
     )
     ok(loaded, `${label}：预览图雪碧图解密成功`)
+    // 开始播放后雪碧图在后台预载成 blob: URL，之后悬停直接用内存里的图片
+    const pre = await page
+      .waitForFunction(
+        () => {
+          const t = document.querySelector('.tip .thumb')
+          return t && getComputedStyle(t).backgroundImage.includes('blob:')
+        },
+        { timeout: 10000 },
+      )
+      .then(() => true)
+      .catch(() => false)
+    ok(pre, `${label}：雪碧图已在后台预载到内存`)
   }
   await shot(page, `${label}-player`)
 

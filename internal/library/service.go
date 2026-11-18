@@ -54,7 +54,7 @@ type Settings struct {
 	AutoCheckUpdate bool `json:"autoCheckUpdate"`
 	// MetadataWorkers 是同时处理条目（刮削、下载封面、截图、字幕）的线程数
 	MetadataWorkers int `json:"metadataWorkers"`
-	// TrickplayWorkers 是同时生成进度条预览图的线程数（每个线程运行一个 ffmpeg）
+	// TrickplayWorkers 是生成进度条预览图时同时运行的 ffmpeg 数（一次处理一个视频，每个 ffmpeg 截取一个时间点）
 	TrickplayWorkers int `json:"trickplayWorkers"`
 }
 
@@ -75,7 +75,7 @@ type Service struct {
 	FF       *media.Tools // 可能为 nil：没有 ffmpeg 时只能播放，不做截图和字幕
 	AssetDir string
 	Main     *tasks.Queue
-	Heavy    *tasks.Queue // 预览图等耗时任务单独排队，不阻塞元数据处理
+	Heavy    *tasks.Queue // 预览图等耗时任务单独排队，不阻塞元数据处理；一次只处理一个视频，视频内部并行截图
 
 	// NewProvider 允许测试替换刮削数据源。
 	NewProvider func(kind string, s Settings) (scraper.Provider, error)
@@ -102,14 +102,13 @@ func New(ctx context.Context, d *db.DB, ff *media.Tools, assetDir string) *Servi
 		FF:       ff,
 		AssetDir: assetDir,
 		Main:     tasks.New(ctx, "元数据", DefaultMetadataWorkers),
-		Heavy:    tasks.New(ctx, "预览图", DefaultTrickplayWorkers),
+		Heavy:    tasks.New(ctx, "预览图", 1),
 		baseCtx:  ctx,
 		scanning: map[int64]*rescan{},
 	}
 	s.NewProvider = s.defaultProvider
 	st := s.Settings(ctx)
 	s.Main.SetWorkers(st.MetadataWorkers)
-	s.Heavy.SetWorkers(st.TrickplayWorkers)
 	return s
 }
 
@@ -149,7 +148,6 @@ func (s *Service) SaveSettings(ctx context.Context, st Settings) error {
 	s.settings = &st
 	s.mu.Unlock()
 	s.Main.SetWorkers(st.MetadataWorkers)
-	s.Heavy.SetWorkers(st.TrickplayWorkers)
 	return nil
 }
 
@@ -486,10 +484,23 @@ func (s *Service) EnqueueItem(id int64, refresh bool) {
 
 func (s *Service) EnqueueTrickplay(id int64) {
 	s.progress.trickQueued(id)
-	s.Heavy.Add(fmt.Sprintf("trick:%d", id), fmt.Sprintf("生成预览图 #%d", id), func(ctx context.Context) error {
+	s.Heavy.Add(fmt.Sprintf("trick:%d", id), fmt.Sprintf("生成预览图 #%d", id), s.trickTask(id))
+}
+
+// PrioritizeTrickplay 有人打开播放页时调用：条目还没有预览图的话，把它的任务插到队首。
+func (s *Service) PrioritizeTrickplay(ctx context.Context, it *db.Item) {
+	if s.FF == nil || it.Trickplay != "" || it.Duration <= 0 || !s.Settings(ctx).TrickplayEnabled {
+		return
+	}
+	s.progress.trickQueued(it.ID)
+	s.Heavy.AddFront(fmt.Sprintf("trick:%d", it.ID), fmt.Sprintf("生成预览图 #%d", it.ID), s.trickTask(it.ID))
+}
+
+func (s *Service) trickTask(id int64) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
 		defer s.progress.trickDone(id)
 		return s.GenerateTrickplay(ctx, id)
-	})
+	}
 }
 
 // ProcessItem 依次执行探测、本地元数据、刮削、截图、字幕。refresh 时重新执行所有步骤。
@@ -886,35 +897,35 @@ func (s *Service) GenerateTrickplay(ctx context.Context, id int64) error {
 	if it.Duration <= 0 {
 		return nil // 还没探测完，下次扫描再生成
 	}
-	tmp, err := os.MkdirTemp(s.AssetDir, "trick-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	info, files, err := s.FF.Trickplay(ctx, it.Path, it.Duration, it.Width, it.Height, tmp)
-	if err != nil {
-		return err
-	}
+	ctx, cancel := context.WithTimeout(ctx, time.Hour)
+	defer cancel()
+	// 雪碧图在内存中拼好后直接加密保存，不经过临时文件
 	var blobs []*db.Blob
-	td := TrickplayData{TrickplayInfo: *info}
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return err
+	cleanup := func() {
+		for _, b := range blobs {
+			os.Remove(b.Path)
 		}
-		b, err := s.saveAsset(data, "image/jpeg", ".jpg")
+	}
+	info, err := s.FF.Trickplay(ctx, it.Path, it.Duration, it.Width, it.Height, s.Settings(ctx).TrickplayWorkers, func(sprite []byte) error {
+		b, err := s.saveAsset(sprite, "image/jpeg", ".jpg")
 		if err != nil {
 			return err
 		}
 		blobs = append(blobs, b)
+		return nil
+	})
+	if err != nil {
+		cleanup()
+		return err
+	}
+	td := TrickplayData{TrickplayInfo: *info}
+	for _, b := range blobs {
 		td.Sprites = append(td.Sprites, b.ID)
 	}
 	j, _ := json.Marshal(td)
 	old, err := s.DB.SetTrickplay(ctx, id, string(j), blobs)
 	if err != nil {
-		for _, b := range blobs {
-			os.Remove(b.Path)
-		}
+		cleanup()
 		return err
 	}
 	s.RemoveAssets(old)

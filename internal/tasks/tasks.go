@@ -105,6 +105,29 @@ func (q *Queue) Add(key, label string, fn func(ctx context.Context) error) {
 	q.cond.Signal()
 }
 
+// AddFront 把任务插到队首；已在排队的同 key 任务会被移到队首（保留原来的函数），
+// 同 key 任务正在运行时什么都不做（用于“优先处理”，不是“再做一次”）。
+func (q *Queue) AddFront(key, label string, fn func(ctx context.Context) error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, running := q.running[key]; q.closed || running {
+		return
+	}
+	t := &task{key: key, label: label, fn: fn}
+	if q.queued[key] {
+		for i, p := range q.pending {
+			if p.key == key {
+				t = p
+				q.pending = append(q.pending[:i], q.pending[i+1:]...)
+				break
+			}
+		}
+	}
+	q.queued[key] = true
+	q.pending = append([]*task{t}, q.pending...)
+	q.cond.Signal()
+}
+
 func (q *Queue) worker(ctx context.Context) {
 	defer q.wg.Done()
 	for {

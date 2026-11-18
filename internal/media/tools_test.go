@@ -3,9 +3,9 @@ package media
 import (
 	"bytes"
 	"context"
+	"image"
 	"image/jpeg"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,16 +48,25 @@ func exerciseTools(t *testing.T, tl *Tools) {
 		if err != nil || jpegWidth(t, full) != 320 {
 			t.Fatalf("原尺寸截图失败: %v", err)
 		}
-		info, files, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, t.TempDir())
+		var files [][]byte
+		info, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 4, func(b []byte) error { files = append(files, b); return nil })
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(files) != 1 || info.Count < 1 || info.Height != 136 {
-			t.Fatalf("预览图不正确: %+v %v", info, files)
+		// 12 秒的视频每 10 秒一张：两张缩略图，雪碧图只有一行两列
+		if len(files) != 1 || info.Count != 2 || info.Height != 136 {
+			t.Fatalf("预览图不正确: %+v %d", info, len(files))
 		}
-		sprite, _ := os.ReadFile(files[0])
-		if w := jpegWidth(t, sprite); w != info.Width*info.Cols {
-			t.Fatalf("雪碧图宽度 %d", w)
+		sprite, err := jpeg.Decode(bytes.NewReader(files[0]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b := sprite.Bounds(); b.Dx() != info.Width*2 || b.Dy() != info.Height {
+			t.Fatalf("雪碧图尺寸 %v", b)
+		}
+		// 第二张取自 10 秒处，画面应和第一张不同（确实跳转了，不是重复第一帧）
+		if sameCell(sprite, info.Width, info.Height) {
+			t.Fatal("两张缩略图完全相同，跳转截图没有生效")
 		}
 		vtt, err := tl.ExtractSubtitle(ctx, p, r.Subs[0].Index)
 		if err != nil {
@@ -81,8 +90,16 @@ func exerciseTools(t *testing.T, tl *Tools) {
 		if err != nil || jpegWidth(t, img) != 320 {
 			t.Fatalf("HEVC 截图失败: %v", err)
 		}
-		if _, files, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, t.TempDir()); err != nil || len(files) != 1 {
+		n := 0
+		if _, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 2, func([]byte) error { n++; return nil }); err != nil || n != 1 {
 			t.Fatalf("HEVC 预览图失败: %v", err)
+		}
+	})
+
+	t.Run("截不到画面", func(t *testing.T) {
+		_, err := tl.Trickplay(ctx, filepath.Join("testdata", "external.srt"), 30, 320, 180, 2, func([]byte) error { return nil })
+		if err == nil {
+			t.Fatal("不是视频的文件应该生成失败")
 		}
 	})
 
@@ -137,4 +154,25 @@ func TestNoEmbeddedByDefault(t *testing.T) {
 	if _, err := ExtractEmbedded(t.TempDir()); err == nil {
 		t.Fatal("没有内置 ffmpeg 时解压应失败")
 	}
+}
+
+// sameCell 比较雪碧图第一行前两格的像素是否完全相同。
+func sameCell(img image.Image, w, h int) bool {
+	for y := 0; y < h; y += 4 {
+		for x := 0; x < w; x += 4 {
+			r1, g1, b1, _ := img.At(x, y).RGBA()
+			r2, g2, b2, _ := img.At(x+w, y).RGBA()
+			if absDiff(r1, r2)+absDiff(g1, g2)+absDiff(b1, b2) > 0x3000 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func absDiff(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }

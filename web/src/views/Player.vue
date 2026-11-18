@@ -332,6 +332,49 @@ function onBarUp(e) {
 }
 function onBarMove(e) {
   hover.value = barTime(e)
+  loadSprites() // 播放还没开始就先悬停：立即开始预载
+}
+
+// 进度条预览图预载：开始播放后在后台逐张拉取雪碧图，转成 blob: URL 留在内存里，
+// 悬停时立即显示，不会因为解密缓存被视频数据挤掉而反复重新下载。悬停到的那张优先。
+const spriteUrls = ref([])
+let spriteStarted = false
+let spriteWant = -1
+let spriteAbort = null
+let spriteTimer = null
+let spriteList = [] // 创建过的 blob: URL，离开页面时释放
+async function loadSprites() {
+  const tp = trick.value
+  if (spriteStarted || !tp?.sprites?.length) return
+  spriteStarted = true
+  clearTimeout(spriteTimer)
+  spriteAbort = new AbortController()
+  const urls = new Array(tp.sprites.length).fill(null)
+  spriteList = urls
+  try {
+    for (;;) {
+      const k = spriteWant >= 0 && !urls[spriteWant] ? spriteWant : urls.findIndex((u) => !u)
+      if (k < 0) break
+      const res = await fetch(tp.sprites[k], { signal: spriteAbort.signal })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      const blob = await res.blob()
+      if (spriteAbort.signal.aborted) break
+      urls[k] = URL.createObjectURL(blob)
+      // 先解码一次，第一次显示时不闪
+      const img = new Image()
+      img.src = urls[k]
+      await img.decode().catch(() => {})
+      spriteUrls.value = urls.slice()
+    }
+  } catch {
+    // 预载失败（例如离开页面）：悬停时退回直接引用原地址
+  }
+  spriteUrls.value = urls.slice()
+}
+function onPlayingOnce() {
+  waiting.value = false
+  // 等起播的缓冲先完成，再在后台预载
+  if (!spriteStarted && !spriteTimer) spriteTimer = setTimeout(loadSprites, 1500)
 }
 
 // 进度条预览图：雪碧图中第 n 张
@@ -344,8 +387,9 @@ const preview = computed(() => {
   const sheet = Math.floor(n / per)
   const k = n % per
   if (!tp.sprites[sheet]) return null
+  spriteWant = sheet
   return {
-    backgroundImage: `url("${tp.sprites[sheet]}")`,
+    backgroundImage: `url("${spriteUrls.value[sheet] || tp.sprites[sheet]}")`,
     backgroundPosition: `-${(k % tp.cols) * tp.width}px -${Math.floor(k / tp.cols) * tp.height}px`,
     width: tp.width + 'px',
     height: tp.height + 'px',
@@ -444,6 +488,10 @@ onBeforeUnmount(() => {
   clearInterval(countdownTimer)
   clearTimeout(hideTimer)
   clearTimeout(resumeTimer)
+  clearTimeout(spriteTimer)
+  spriteAbort?.abort()
+  spriteStarted = true // 卸载后不再开始预载
+  for (const u of spriteList) if (u) URL.revokeObjectURL(u)
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
   if (video.value?.webkitDisplayingFullscreen) video.value.webkitExitFullscreen()
   leaveNativeFullscreen()
@@ -469,7 +517,7 @@ watch(menu, (m) => m && (showUI.value = true))
       @pause="onPause"
       @ended="onEnded"
       @waiting="waiting = true"
-      @playing="waiting = false"
+      @playing="onPlayingOnce"
       @canplay="waiting = false"
       @error="onError"
       @click="onVideoClick"

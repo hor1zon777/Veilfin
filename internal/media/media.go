@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/jpeg"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -174,42 +177,158 @@ type TrickplayInfo struct {
 	Count    int     `json:"count"` // 缩略图总数
 }
 
-// Trickplay 生成进度条预览雪碧图，写入 outDir，返回布局信息和按顺序排列的文件路径。
-// 只解码关键帧（-skip_frame nokey），3 小时的视频也能很快完成。
-func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw, vh int, outDir string) (*TrickplayInfo, []string, error) {
-	if duration <= 0 {
-		return nil, nil, errors.New("时长未知，无法生成预览图")
-	}
-	info := &TrickplayInfo{Interval: 10, Cols: 10, Rows: 10, Width: 240}
+// TrickplayQuality 是雪碧图的 JPEG 质量。
+const TrickplayQuality = 80
+
+// TrickplayLayout 计算进度条预览图的布局：默认每 10 秒一张，最多 2000 张。
+func TrickplayLayout(duration float64, vw, vh int) TrickplayInfo {
+	info := TrickplayInfo{Interval: 10, Cols: 10, Rows: 10, Width: 240, Height: 135}
 	if n := duration / info.Interval; n > 2000 {
 		info.Interval = math.Ceil(duration / 2000)
 	}
-	info.Height = 135
 	if vw > 0 && vh > 0 {
-		info.Height = int(math.Round(float64(info.Width)*float64(vh)/float64(vw)/2)) * 2
+		info.Height = max(int(math.Round(float64(info.Width)*float64(vh)/float64(vw)/2))*2, 2)
 	}
-	info.Count = int(math.Ceil(duration / info.Interval))
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return nil, nil, err
-	}
-	pattern := filepath.Join(outDir, "sprite_%03d.jpg")
-	// eof_action=pass：比间隔一半还短的视频，fps 滤镜默认一帧都不输出，这里让它至少输出最后一帧
-	vf := fmt.Sprintf("fps=1/%g:eof_action=pass,scale=%d:%d:out_range=pc,%s,tile=%dx%d", info.Interval, info.Width, info.Height, jpegFormat, info.Cols, info.Rows)
-	_, err := run(ctx, 30*time.Minute, nil, t.FFmpeg, "-v", "error", "-skip_frame", "nokey", "-i", path,
-		"-an", "-sn", "-vf", vf, "-fps_mode", "vfr", "-q:v", "5", "-y", pattern)
+	info.Count = max(int(math.Ceil(duration/info.Interval)), 1)
+	return info
+}
+
+// TrickFrame 跳到 at 秒之前最近的关键帧，只解码这一帧并缩放到 w×h。
+// 输入端 -ss 借助容器索引直接定位，只读取这一小段数据，不会把整个文件读一遍。
+func (t *Tools) TrickFrame(ctx context.Context, path string, at float64, w, h int) (image.Image, error) {
+	vf := fmt.Sprintf("scale=%d:%d:flags=area:out_range=pc,%s", w, h, jpegFormat)
+	out, err := run(ctx, time.Minute, nil, t.FFmpeg, "-v", "error",
+		"-noaccurate_seek", "-ss", strconv.FormatFloat(math.Max(at, 0), 'f', 3, 64),
+		"-skip_frame", "nokey", "-threads", "1", "-i", path,
+		"-an", "-sn", "-dn", "-frames:v", "1", "-vf", vf, "-q:v", "2", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	files, _ := filepath.Glob(filepath.Join(outDir, "sprite_*.jpg"))
-	sort.Strings(files)
-	if len(files) == 0 {
-		return nil, nil, errors.New("没有生成预览图")
+	if len(out) == 0 {
+		return nil, errors.New("没有截到画面")
 	}
-	// 只解码关键帧时，实际得到的帧数可能略少于预期，按文件数修正上限
-	if maxN := len(files) * info.Cols * info.Rows; info.Count > maxN {
-		info.Count = maxN
+	return jpeg.Decode(bytes.NewReader(out))
+}
+
+// Trickplay 生成进度条预览雪碧图。每个时间点单独跳转截取一帧（见 TrickFrame），parallel 个 ffmpeg 并行；
+// 每拼好一张雪碧图就以 JPEG 调用 save（按顺序）。返回最终的布局信息。
+func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw, vh, parallel int, save func(sprite []byte) error) (*TrickplayInfo, error) {
+	if duration <= 0 {
+		return nil, errors.New("时长未知，无法生成预览图")
 	}
-	return info, files, nil
+	info := TrickplayLayout(duration, vw, vh)
+	parallel = max(parallel, 1)
+	per := info.Cols * info.Rows
+	sheets := (info.Count + per - 1) / per
+	var last image.Image // 上一张成功截到的画面，用来填补个别失败的时间点
+	for sh := 0; sh < sheets; sh++ {
+		start := sh * per
+		n := min(per, info.Count-start)
+		frames, firstErr := t.trickFrames(ctx, path, info, start, n, parallel, sh == 0)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lastOK := -1
+		for i, f := range frames {
+			if f != nil {
+				lastOK = i
+			}
+		}
+		if lastOK < 0 {
+			if sh == 0 {
+				return nil, fmt.Errorf("无法从视频中截取画面: %v", firstErr)
+			}
+			info.Count = start // 后面的部分（例如文件末尾损坏）截不到画面：到此为止
+			break
+		}
+		if sh == sheets-1 {
+			n = lastOK + 1 // 末尾截不到的时间点直接去掉
+			info.Count = start + n
+		}
+		frames = frames[:n]
+		// 填补失败的时间点：用前一张；开头就失败的用第一张成功的
+		for i := range frames {
+			if frames[i] == nil {
+				frames[i] = last
+			} else {
+				last = frames[i]
+			}
+		}
+		for i := range frames {
+			if frames[i] == nil {
+				frames[i] = frames[lastOK]
+			}
+		}
+		rows := (n + info.Cols - 1) / info.Cols // 最后一张雪碧图只保留用到的行
+		cols := min(n, info.Cols)
+		dst := image.NewRGBA(image.Rect(0, 0, cols*info.Width, rows*info.Height))
+		for i, f := range frames {
+			x, y := (i%info.Cols)*info.Width, (i/info.Cols)*info.Height
+			draw.Draw(dst, image.Rect(x, y, x+info.Width, y+info.Height), f, f.Bounds().Min, draw.Src)
+		}
+		var buf bytes.Buffer
+		if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: TrickplayQuality}); err != nil {
+			return nil, err
+		}
+		if err := save(buf.Bytes()); err != nil {
+			return nil, err
+		}
+	}
+	if info.Count <= 0 {
+		return nil, errors.New("没有生成预览图")
+	}
+	return &info, nil
+}
+
+// trickFrames 并行截取第 start 张起的 n 张缩略图，失败的位置为 nil。
+// probe 为 true 时（第一张雪碧图），前几张全部失败就提前放弃（多半是解码器不支持或文件损坏）。
+func (t *Tools) trickFrames(ctx context.Context, path string, info TrickplayInfo, start, n, parallel int, probe bool) ([]image.Image, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	frames := make([]image.Image, n)
+	var (
+		mu       sync.Mutex
+		firstErr error
+		fails    int
+		oks      int
+		next     int
+	)
+	var wg sync.WaitGroup
+	for range min(parallel, n) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				i := next
+				next++
+				mu.Unlock()
+				if i >= n || ctx.Err() != nil {
+					return
+				}
+				img, err := t.TrickFrame(ctx, path, float64(start+i)*info.Interval, info.Width, info.Height)
+				mu.Lock()
+				if err == nil && (img.Bounds().Dx() != info.Width || img.Bounds().Dy() != info.Height) {
+					err = errors.New("画面尺寸不符")
+				}
+				if err != nil {
+					fails++
+					if firstErr == nil {
+						firstErr = err
+					}
+					if probe && oks == 0 && fails >= 8 {
+						cancel()
+					}
+				} else {
+					oks++
+					frames[i] = img
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return frames, firstErr
 }
 
 // ExtractSubtitle 把内嵌文本字幕流转换成 WebVTT。

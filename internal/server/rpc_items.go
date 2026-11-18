@@ -477,6 +477,8 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 正在看的视频还没有预览图：插到预览图队列最前面
+	s.Lib.PrioritizeTrickplay(c.ctx, row.Item)
 	d, err := s.detail(c, v, row)
 	if err != nil {
 		return nil, err

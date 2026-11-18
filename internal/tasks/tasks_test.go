@@ -81,3 +81,47 @@ func TestSetWorkers(t *testing.T) {
 		t.Fatal(q.Workers())
 	}
 }
+
+// AddFront：新任务插到队首；已排队的移到队首且不重复；正在运行的不再加入。
+func TestAddFront(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	q := New(ctx, "test", 1)
+	defer func() {
+		cancel()
+		q.Stopped()
+	}()
+	var mu sync.Mutex
+	var order []string
+	started := make(chan struct{})
+	release := make(chan struct{})
+	job := func(name string) func(context.Context) error {
+		return func(context.Context) error {
+			if name == "a" {
+				close(started)
+				<-release
+			}
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			return nil
+		}
+	}
+	q.Add("a", "a", job("a"))
+	<-started // a 正在运行
+	q.Add("b", "b", job("b"))
+	q.Add("c", "c", job("c"))
+	q.Add("d", "d", job("d"))
+	q.AddFront("c", "c", job("c2")) // 已在排队：移到队首，保留原来的函数
+	q.AddFront("e", "e", job("e"))  // 新任务：插到队首
+	q.AddFront("a", "a", job("a2")) // 正在运行：忽略
+	if st := q.Status(); st.Pending != 4 {
+		t.Fatalf("排队数 %d，期望 4", st.Pending)
+	}
+	close(release)
+	if err := q.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(order); got != "[a e c b d]" {
+		t.Fatalf("执行顺序 %s", got)
+	}
+}

@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"os"
@@ -192,16 +193,18 @@ func TestMetadataWorkersSetting(t *testing.T) {
 		}
 	}
 
-	if got.Settings["trickplayWorkers"] != float64(4) || e.srv.Lib.Heavy.Workers() != 4 {
-		t.Fatalf("预览图默认线程数不正确: %v / %d", got.Settings["trickplayWorkers"], e.srv.Lib.Heavy.Workers())
+	// 预览图一次处理一个视频，线程数是这个视频同时运行的 ffmpeg 数，队列本身始终只有 1 个工作协程
+	ctx := context.Background()
+	if got.Settings["trickplayWorkers"] != float64(4) || e.srv.Lib.Settings(ctx).TrickplayWorkers != 4 {
+		t.Fatalf("预览图默认线程数不正确: %v / %d", got.Settings["trickplayWorkers"], e.srv.Lib.Settings(ctx).TrickplayWorkers)
 	}
 	for _, c := range []struct{ set, want int }{{2, 2}, {100, 16}, {0, 4}, {1, 1}} {
 		st := got.Settings
 		st["trickplayWorkers"] = c.set
 		var out map[string]any
 		admin.must("admin.settings.set", st, &out)
-		if out["trickplayWorkers"] != float64(c.want) || e.srv.Lib.Heavy.Workers() != c.want {
-			t.Fatalf("预览图设置 %d：返回 %v，队列 %d，期望 %d", c.set, out["trickplayWorkers"], e.srv.Lib.Heavy.Workers(), c.want)
+		if out["trickplayWorkers"] != float64(c.want) || e.srv.Lib.Settings(ctx).TrickplayWorkers != c.want || e.srv.Lib.Heavy.Workers() != 1 {
+			t.Fatalf("预览图设置 %d：返回 %v，生效 %d，队列 %d，期望 %d", c.set, out["trickplayWorkers"], e.srv.Lib.Settings(ctx).TrickplayWorkers, e.srv.Lib.Heavy.Workers(), c.want)
 		}
 	}
 }

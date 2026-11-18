@@ -86,11 +86,11 @@ async function save() {
           <span class="hint">同时刮削、下载封面、截图的条目数，默认 4。刮削服务限流或服务器性能较弱时可以调低；修改后立即生效。</span>
         </div>
         <label class="check"><input v-model="s.watchEnabled" type="checkbox" /> 监听目录变化，自动扫描新增 / 删除的文件</label>
-        <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（只解码关键帧，3 小时视频约需几十秒）</label>
+        <label class="check"><input v-model="s.trickplayEnabled" type="checkbox" /> 生成进度条预览图（每个时间点只读取附近的一帧，不会把整个文件读一遍）</label>
         <div v-if="s.trickplayEnabled" class="field sub">
           <label>预览图生成线程数（1–16）</label>
           <input v-model="s.trickplayWorkers" class="input short" type="number" min="1" max="16" step="1" inputmode="numeric" />
-          <span class="hint">同时生成预览图的视频数，默认 4。每个线程运行一个 ffmpeg，比较占 CPU 和磁盘读取，建议不超过 CPU 核数的一半；修改后立即生效。</span>
+          <span class="hint">预览图一次处理一个视频，这里是同时截图的 ffmpeg 数，默认 4。线程越多越快，但更占 CPU；机械硬盘或网络存储上调高收益有限，建议不超过 CPU 核数的一半；修改后立即生效。</span>
         </div>
         <label class="check"><input v-model="s.keepPageTitle" type="checkbox" /> 播放视频时网页标题保持不变（不显示正在播放的视频名称）</label>
         <label class="check"><input v-model="s.autoCheckUpdate" type="checkbox" /> 自动检查更新（每 12 小时访问一次 GitHub，只提示，不会自动安装）</label>

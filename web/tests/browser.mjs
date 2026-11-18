@@ -3,7 +3,7 @@
 // 覆盖：网页模式（浏览器内加密 + Service Worker 解密）与本地客户端模式下的初始化、登录、浏览、
 // 播放、拖动、字幕、进度条预览图、继续观看、管理后台页面、复制公钥、备份 / 下载 / 在线恢复。截图保存在 tests/screenshots/。
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +58,18 @@ ffmpeg(['-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=60', '-f', '
 const media2 = join(work, 'media2')
 mkdirSync(media2, { recursive: true })
 ffmpeg(['-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=20', '-c:v', 'libx264', '-preset', 'ultrafast', '-movflags', '+faststart', join(media2, 'ABC-123.mp4')])
+
+// 服务端会跳过刚修改过（可能正在复制）的视频：把测试视频的修改时间调到一小时前
+function age(dir) {
+  const t = new Date(Date.now() - 3600 * 1000)
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) age(p)
+    else utimesSync(p, t, t)
+  }
+}
+age(media)
+age(media2)
 
 const port = 19000 + Math.floor(Math.random() * 500)
 const cport = port + 600

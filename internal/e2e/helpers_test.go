@@ -98,6 +98,10 @@ func newEnvWith(t *testing.T, cfg server.Config) *env {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	// 测试里的视频都是刚生成的：不等待“文件稳定”，需要测这个行为的测试自己调
+	old := library.FileSettleTime
+	library.FileSettleTime = 0
+	t.Cleanup(func() { library.FileSettleTime = old })
 	e := &env{t: t, ctx: ctx, dataDir: t.TempDir(), mediaDir: t.TempDir()}
 	cfg.DataDir = e.dataDir
 	if cfg.Version == "" {

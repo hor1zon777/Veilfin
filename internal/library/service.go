@@ -87,6 +87,41 @@ type Service struct {
 
 	scanMu   sync.Mutex
 	scanning map[int64]*rescan // 正在扫描的媒体库；同一个库同时只跑一次扫描
+
+	settleMu     sync.Mutex
+	settleTimers map[int64]*time.Timer // 有文件正在写入的媒体库：等文件稳定后补扫
+}
+
+// FileSettleTime：修改时间在这段时间以内的视频视为可能正在复制 / 下载，扫描时先跳过，稳定后再处理。
+// 很多工具把 MP4 的索引（moov）写在文件末尾，没写完就探测会报“moov atom not found”。
+// 测试可以调小（为 0 时不等待）。
+var FileSettleTime = 2 * time.Minute
+
+// writing 判断文件是否可能还在写入：修改时间在 FileSettleTime 以内。
+// 修改时间明显在未来的（NAS 与服务器时钟不一致）不算，否则这些文件会一直不被处理。
+func writing(mtime, now time.Time) bool {
+	age := now.Sub(mtime)
+	return FileSettleTime > 0 && age < FileSettleTime && age > -FileSettleTime
+}
+
+// scheduleSettleScan 在 at 时刻（文件稳定后）补扫一次媒体库；已经安排过的取较晚的时间。
+func (s *Service) scheduleSettleScan(libID int64, at time.Time) {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+	if s.settleTimers == nil {
+		s.settleTimers = map[int64]*time.Timer{}
+	}
+	if t := s.settleTimers[libID]; t != nil {
+		t.Stop()
+	}
+	s.settleTimers[libID] = time.AfterFunc(time.Until(at), func() {
+		s.settleMu.Lock()
+		delete(s.settleTimers, libID)
+		s.settleMu.Unlock()
+		if s.baseCtx.Err() == nil {
+			s.EnqueueScan(libID, false)
+		}
+	})
 }
 
 // rescan 记录扫描进行期间又有人要求扫描：当前这次结束后再补扫一次。
@@ -250,6 +285,9 @@ func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) er
 	seen := map[string]bool{}
 	var unavailable []string // 不可访问的根目录：其下的条目不删除（防止硬盘未挂载时清空媒体库）
 	multi := len(lib.Paths) > 1
+	now := time.Now()
+	var settling []string // 正在写入、本次跳过的文件
+	var newestWrite time.Time
 
 	for _, root := range lib.Paths {
 		root = filepath.Clean(root)
@@ -297,12 +335,25 @@ func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) er
 				}
 				return nil
 			}
+			mtime := info.ModTime().Unix()
+			ex, known := existing[path]
+			changed := !known || ex.Size != info.Size() || ex.Mtime != mtime
+			if changed && writing(info.ModTime(), now) {
+				// 可能还在复制 / 下载：新文件先不入库，已有条目先不重新探测，等稳定后补扫
+				if known {
+					seen[path] = true
+				}
+				settling = append(settling, filepath.Base(path))
+				if info.ModTime().After(newestWrite) {
+					newestWrite = info.ModTime()
+				}
+				return nil
+			}
 			found++
 			seen[path] = true
 			s.progress.update(lib.ID, func(t *scanTrack) { t.p.Found++ })
-			mtime := info.ModTime().Unix()
-			if ex, ok := existing[path]; ok {
-				if ex.Size != info.Size() || ex.Mtime != mtime {
+			if known {
+				if changed {
 					// 内容变了：换新的对象 ID，让 CDN 上的旧缓存自然失效
 					if err := s.DB.ReplaceVideoFile(ctx, ex.ID, info.Size(), mtime, mediacrypt.NewID(), mime); err != nil {
 						log.Printf("更新 %s 失败: %v", path, err)
@@ -329,6 +380,15 @@ func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) er
 			log.Printf("媒体库「%s」的目录 %s 为空但之前有视频，可能未挂载，本次不删除条目", lib.Name, root)
 			unavailable = append(unavailable, root)
 		}
+	}
+
+	if len(settling) > 0 {
+		names := strings.Join(settling[:min(len(settling), 3)], "、")
+		if len(settling) > 3 {
+			names += fmt.Sprintf(" 等 %d 个", len(settling))
+		}
+		log.Printf("媒体库「%s」中 %s 刚修改过，可能正在复制，稳定后再处理", lib.Name, names)
+		s.scheduleSettleScan(lib.ID, newestWrite.Add(FileSettleTime+5*time.Second))
 	}
 
 	var roots []string

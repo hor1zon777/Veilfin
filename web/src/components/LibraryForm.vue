@@ -1,5 +1,5 @@
 <script setup>
-// 媒体库表单：名称、类型、刮削源、目录（带服务器目录浏览器）、受限。
+// 媒体库表单：名称、类型、刮削源、目录（带服务器目录浏览器）、受限、进度条预览图。
 // 管理后台的“添加 / 编辑媒体库”弹窗和首次设置向导共用。lib 对象由父组件持有，表单直接修改它。
 import { ref } from 'vue'
 import { rpc, toastError } from '../store.js'
@@ -12,10 +12,13 @@ const emit = defineEmits(['submit'])
 
 const defaultScraper = { home: 'none', movie: 'tmdb', jav: 'metatube', other: 'none' }
 const defaultName = { home: '自制视频', movie: '电影', jav: '日本影片', other: '视频' }
+// 进度条预览图默认只给电影库生成，其他类型可以手动勾选
+const defaultTrickplay = { home: false, movie: true, jav: false, other: false }
 
 function onKind() {
   const l = props.lib
   l.scraper = defaultScraper[l.kind]
+  l.trickplay = defaultTrickplay[l.kind]
   if (l.kind === 'jav') l.restricted = true
   // 名称还是某个类型的默认名（或为空）时，跟着类型一起改
   if (!l.name || Object.values(defaultName).includes(l.name)) l.name = defaultName[l.kind]
@@ -74,6 +77,8 @@ function pick() {
     </div>
     <label class="check"><input v-model="lib.restricted" type="checkbox" /> 受限媒体库</label>
     <p class="hint">受限媒体库只对被授权的用户可见；用户设置 PIN 后，还需要输入 PIN 才能看到。</p>
+    <label class="check"><input v-model="lib.trickplay" type="checkbox" /> 生成进度条预览图</label>
+    <p class="hint">播放时鼠标悬停在进度条上显示画面预览。每 10 秒截一帧，只读取附近的数据、不会把整个文件读一遍；关闭后不再为这个媒体库生成，已生成的保留。</p>
     <button type="submit" class="hidden" />
 
     <Modal v-if="browser" title="选择目录" width="560px" @close="browser = null">

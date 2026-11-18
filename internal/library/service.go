@@ -47,7 +47,6 @@ type Settings struct {
 	ScraperProxy      string `json:"scraperProxy"`
 	ScanIntervalHours int    `json:"scanIntervalHours"`
 	WatchEnabled      bool   `json:"watchEnabled"`
-	TrickplayEnabled  bool   `json:"trickplayEnabled"`
 	// KeepPageTitle 为真时，播放视频不会把浏览器标签页标题改成视频名称
 	KeepPageTitle bool `json:"keepPageTitle"`
 	// AutoCheckUpdate 为真时服务端定时访问 GitHub 检查新版本（只检查，不自动安装）
@@ -67,7 +66,7 @@ const (
 )
 
 func DefaultSettings() Settings {
-	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, TrickplayEnabled: true, AutoCheckUpdate: true, MetadataWorkers: DefaultMetadataWorkers, TrickplayWorkers: DefaultTrickplayWorkers}
+	return Settings{ServerName: "Veilfin", TMDBLang: "zh-CN", ScanIntervalHours: 6, WatchEnabled: true, AutoCheckUpdate: true, MetadataWorkers: DefaultMetadataWorkers, TrickplayWorkers: DefaultTrickplayWorkers}
 }
 
 type Service struct {
@@ -374,7 +373,7 @@ func (s *Service) scanLibrary(ctx context.Context, libID int64, refresh bool) er
 	}
 	// 需要处理的条目会在处理完（拿到时长）后自己排队生成预览图，这里只补上其余缺预览图的
 	var tricks []int64
-	if s.Settings(ctx).TrickplayEnabled && s.FF != nil {
+	if lib.Trickplay && s.FF != nil {
 		tids, _ := s.DB.ItemsNeedingWork(ctx, lib.ID, db.StateTrickplay)
 		for _, id := range tids {
 			if !pending[id] {
@@ -484,16 +483,24 @@ func (s *Service) EnqueueItem(id int64, refresh bool) {
 
 func (s *Service) EnqueueTrickplay(id int64) {
 	s.progress.trickQueued(id)
-	s.Heavy.Add(fmt.Sprintf("trick:%d", id), fmt.Sprintf("生成预览图 #%d", id), s.trickTask(id))
+	s.Heavy.Add(trickKey(id), fmt.Sprintf("生成预览图 #%d", id), s.trickTask(id))
 }
+
+func trickKey(id int64) string { return fmt.Sprintf("trick:%d", id) }
 
 // PrioritizeTrickplay 有人打开播放页时调用：条目还没有预览图的话，把它的任务插到队首。
 func (s *Service) PrioritizeTrickplay(ctx context.Context, it *db.Item) {
-	if s.FF == nil || it.Trickplay != "" || it.Duration <= 0 || !s.Settings(ctx).TrickplayEnabled {
+	if s.FF == nil || it.Trickplay != "" || it.Duration <= 0 || !s.trickplayOn(ctx, it.LibraryID) {
 		return
 	}
 	s.progress.trickQueued(it.ID)
-	s.Heavy.AddFront(fmt.Sprintf("trick:%d", it.ID), fmt.Sprintf("生成预览图 #%d", it.ID), s.trickTask(it.ID))
+	s.Heavy.AddFront(trickKey(it.ID), fmt.Sprintf("生成预览图 #%d", it.ID), s.trickTask(it.ID))
+}
+
+// trickplayOn 报告媒体库是否开启了进度条预览图。
+func (s *Service) trickplayOn(ctx context.Context, libID int64) bool {
+	lib, err := s.DB.LibraryByID(ctx, libID)
+	return err == nil && lib.Trickplay
 }
 
 func (s *Service) trickTask(id int64) func(ctx context.Context) error {
@@ -574,7 +581,8 @@ func (s *Service) ProcessItem(ctx context.Context, id int64, refresh bool) error
 			if it.Duration > 0 {
 				at = it.Duration * 0.1
 			}
-			if data, err := s.FF.Frame(ctx, it.Path, at, imaging.Limits["thumb"][0]); err == nil {
+			// 只取最近的关键帧：读取和解码的都只有这一帧
+			if data, err := s.FF.KeyFrame(ctx, it.Path, at, imaging.Limits["thumb"][0]); err == nil {
 				s.SetImageData(ctx, id, "thumb", data, false)
 			} else {
 				log.Printf("截图 %s 失败: %v", filepath.Base(it.Path), err)
@@ -588,7 +596,7 @@ func (s *Service) ProcessItem(ctx context.Context, id int64, refresh bool) error
 			log.Printf("处理字幕 %s 失败: %v", filepath.Base(it.Path), err)
 		}
 	}
-	if s.FF != nil && (refresh || state&db.StateTrickplay == 0) && s.Settings(ctx).TrickplayEnabled {
+	if s.FF != nil && (refresh || state&db.StateTrickplay == 0) && lib.Trickplay {
 		s.EnqueueTrickplay(id)
 	}
 	return nil
@@ -826,12 +834,20 @@ func (s *Service) processSubtitles(ctx context.Context, it *db.Item, probe *medi
 		blobs = append(blobs, b)
 	}
 	if probe != nil {
+		// 所有内嵌文本字幕一次提取：整个文件只读一遍
+		var idx []int
 		for _, st := range probe.Subs {
-			if !st.Text {
-				continue
+			if st.Text {
+				idx = append(idx, st.Index)
 			}
-			vtt, err := s.FF.ExtractSubtitle(ctx, it.Path, st.Index)
-			if err != nil || len(vtt) < 10 {
+		}
+		vtts, err := s.FF.ExtractSubtitles(ctx, it.Path, idx)
+		if err != nil {
+			log.Printf("提取内嵌字幕 %s 失败: %v", filepath.Base(it.Path), err)
+		}
+		for _, st := range probe.Subs {
+			vtt := vtts[st.Index]
+			if !st.Text || len(vtt) < 10 {
 				continue
 			}
 			b, err := s.saveAsset(vtt, "text/vtt; charset=utf-8", ".vtt")
@@ -897,6 +913,9 @@ func (s *Service) GenerateTrickplay(ctx context.Context, id int64) error {
 	if it.Duration <= 0 {
 		return nil // 还没探测完，下次扫描再生成
 	}
+	if !s.trickplayOn(ctx, it.LibraryID) {
+		return nil // 排队之后媒体库关闭了预览图，或手动刷新了未开启预览图的媒体库中的条目
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Hour)
 	defer cancel()
 	// 雪碧图在内存中拼好后直接加密保存，不经过临时文件
@@ -906,13 +925,19 @@ func (s *Service) GenerateTrickplay(ctx context.Context, id int64) error {
 			os.Remove(b.Path)
 		}
 	}
-	info, err := s.FF.Trickplay(ctx, it.Path, it.Duration, it.Width, it.Height, s.Settings(ctx).TrickplayWorkers, func(sprite []byte) error {
+	workers := s.Settings(ctx).TrickplayWorkers
+	key := trickKey(id)
+	s.Heavy.SetLabel(key, fmt.Sprintf("生成预览图 #%d · %d 线程", id, workers))
+	info, err := s.FF.Trickplay(ctx, it.Path, it.Duration, it.Width, it.Height, workers, func(sprite []byte) error {
 		b, err := s.saveAsset(sprite, "image/jpeg", ".jpg")
 		if err != nil {
 			return err
 		}
 		blobs = append(blobs, b)
 		return nil
+	}, func(done, total int) {
+		// 后台概览页显示线程数和进度：一个视频内部由多个 ffmpeg 并行截图
+		s.Heavy.SetLabel(key, fmt.Sprintf("生成预览图 #%d · %d 线程 · %d/%d", id, workers, done, total))
 	})
 	if err != nil {
 		cleanup()

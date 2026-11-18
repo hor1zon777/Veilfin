@@ -137,7 +137,7 @@ func rpcSetup(s *Server, c *call) (any, error) {
 	}
 	s.needsSetup = false
 	if s.cfg.InitialMedia != "" {
-		if libID, err := s.DB.CreateLibrary(c.ctx, &db.Library{Name: "视频", Kind: "home", Scraper: "none", Paths: []string{s.cfg.InitialMedia}}); err == nil {
+		if libID, err := s.DB.CreateLibrary(c.ctx, &db.Library{Name: "视频", Kind: "home", Scraper: "none", Trickplay: true, Paths: []string{s.cfg.InitialMedia}}); err == nil {
 			s.Lib.EnqueueScan(libID, false)
 			s.Lib.RestartWatcher()
 		}

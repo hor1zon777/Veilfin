@@ -174,15 +174,16 @@ function restart() {
   showBubble('replay', '从头播放')
 }
 
-function toggle() {
+// feedback 为 false 时不弹中央气泡（移动端中央按钮本身会切换图标）
+function toggle(feedback = true) {
   const v = video.value
   if (!v) return
   if (v.paused || v.ended) {
     v.play()
-    showBubble('play')
+    if (feedback) showBubble('play')
   } else {
     v.pause()
-    showBubble('pause')
+    if (feedback) showBubble('pause')
   }
 }
 function seek(t) {
@@ -194,7 +195,10 @@ function seek(t) {
 function skip(d) {
   if (!video.value) return
   seek(video.value.currentTime + d)
-  showBubble(d > 0 ? 'forward' : 'rewind', (d > 0 ? '+' : '') + d + ' 秒')
+  const text = (d > 0 ? '+' : '') + d + ' 秒'
+  // 移动端画面中央是弹出的控制按钮，提示放到上方，不挡按钮
+  if (mobile) showFlash(text)
+  else showBubble(d > 0 ? 'forward' : 'rewind', text)
 }
 function setVolume(v) {
   volume.value = Math.max(0, Math.min(1, v))
@@ -574,6 +578,15 @@ watch(menu, (m) => m && (showUI.value = true))
       <div v-if="queue" class="qinfo" :title="queue.label"><Icon name="shuffle" :size="16" /> {{ queue.label }} · {{ queue.index + 1 }}/{{ queue.total }}</div>
     </div>
 
+    <!-- 移动端：轻点画面后，在中央弹出后退 / 播放暂停 / 前进（和顶栏、进度条一起显示、一起收起） -->
+    <div v-if="mobile && !err" class="m-center ui">
+      <button class="icon-btn m-skip" title="后退 10 秒" @click.stop="skip(-10)"><Icon name="rewind" :size="30" /></button>
+      <button class="icon-btn m-play" :class="{ busy: waiting && !ended }" :title="playing ? '暂停' : '播放'" @click.stop="toggle(false)">
+        <Transition name="swap" mode="out-in"><Icon :key="playing ? 'p' : 's'" :name="playing ? 'pause' : 'play'" :size="44" /></Transition>
+      </button>
+      <button class="icon-btn m-skip" title="前进 10 秒" @click.stop="skip(10)"><Icon name="forward" :size="30" /></button>
+    </div>
+
     <div class="bottom ui" @click.stop>
       <!-- 移动端：时间放在进度条上方、左对齐，按钮整行居中 -->
       <div v-if="mobile" class="m-time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
@@ -592,11 +605,14 @@ watch(menu, (m) => m && (showUI.value = true))
       </div>
 
       <div class="controls">
-        <button class="icon-btn" title="后退 10 秒 (←)" @click="skip(-10)"><Icon name="rewind" /></button>
-        <button class="icon-btn big" :title="playing ? '暂停 (空格)' : '播放 (空格)'" @click="toggle">
-          <Transition name="swap" mode="out-in"><Icon :key="playing ? 'p' : 's'" :name="playing ? 'pause' : 'play'" :size="34" /></Transition>
-        </button>
-        <button class="icon-btn" title="前进 10 秒 (→)" @click="skip(10)"><Icon name="forward" /></button>
+        <!-- 移动端的后退 / 播放暂停 / 前进在画面中央 -->
+        <template v-if="!mobile">
+          <button class="icon-btn" title="后退 10 秒 (←)" @click="skip(-10)"><Icon name="rewind" /></button>
+          <button class="icon-btn big" :title="playing ? '暂停 (空格)' : '播放 (空格)'" @click="toggle">
+            <Transition name="swap" mode="out-in"><Icon :key="playing ? 'p' : 's'" :name="playing ? 'pause' : 'play'" :size="34" /></Transition>
+          </button>
+          <button class="icon-btn" title="前进 10 秒 (→)" @click="skip(10)"><Icon name="forward" /></button>
+        </template>
         <button v-if="data?.next" class="icon-btn" :title="'下一个：' + data.next.title" @click="playNext"><Icon name="next" /></button>
         <template v-if="!mobile">
           <div class="time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
@@ -710,6 +726,17 @@ video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .mobile .bottom { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
 .mobile .controls { justify-content: center; flex-wrap: wrap; gap: 2px; margin-top: 0; }
 .mobile .controls .icon-btn:not(.big) { width: 38px; height: 38px; }
+/* 中央控制按钮：容器不接收点击，按钮之间的空白处点到的是画面（收起控制栏） */
+.m-center { top: 50%; display: flex; align-items: center; justify-content: center; gap: 44px; pointer-events: none;
+  transform: translate3d(0, -50%, 0); }
+.m-center .icon-btn { pointer-events: auto; border-radius: 50%; background: rgba(0,0,0,.38); color: #fff;
+  transition: opacity .25s var(--ease-out), transform .3s var(--spring-bouncy), background .2s; }
+.m-center .icon-btn:active { transform: scale(.9); background: rgba(0,0,0,.55); }
+.m-skip { width: 56px; height: 56px; }
+.m-play { width: 76px; height: 76px; }
+.m-play.busy { opacity: 0; pointer-events: none; } /* 缓冲中：中间让给加载动画 */
+.hide-ui .m-center { transform: translate3d(0, -50%, 0) scale(.92); }
+.hide-ui .m-center .icon-btn { pointer-events: none; }
 .mobile .resume-chip { left: 12px; bottom: 150px; }
 .mobile .next-card { left: 12px; right: 12px; bottom: 150px; max-width: none; }
 </style>

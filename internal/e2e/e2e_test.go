@@ -138,7 +138,7 @@ func TestFullLibrary(t *testing.T) {
 	var homeLib, javLib, movieLib struct {
 		ID int64 `json:"id"`
 	}
-	admin.must("admin.libs.create", map[string]any{"name": "家庭录像", "kind": "home", "scraper": "none", "paths": []string{home}}, &homeLib)
+	admin.must("admin.libs.create", map[string]any{"name": "家庭录像", "kind": "home", "scraper": "none", "trickplay": true, "paths": []string{home}}, &homeLib)
 	admin.must("admin.libs.create", map[string]any{"name": "收藏", "kind": "jav", "scraper": "metatube", "restricted": true, "paths": []string{jav}}, &javLib)
 	admin.must("admin.libs.create", map[string]any{"name": "电影", "kind": "movie", "scraper": "tmdb", "paths": []string{movies}}, &movieLib)
 	admin.expectCode("admin.libs.create", map[string]any{"name": "坏", "kind": "home", "paths": []string{"relative/path"}}, "bad_request")

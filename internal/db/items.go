@@ -17,17 +17,18 @@ type Library struct {
 	Restricted bool     `json:"restricted"`
 	Scraper    string   `json:"scraper"` // none | tmdb | metatube
 	Paths      []string `json:"paths"`
+	Trickplay  bool     `json:"trickplay"` // 是否生成进度条预览图
 	SortOrder  int      `json:"sortOrder"`
 	CreatedAt  int64    `json:"createdAt"`
 	LastScanAt int64    `json:"lastScanAt"`
 }
 
-const libCols = "id,name,kind,restricted,scraper,paths,sort_order,created_at,last_scan_at"
+const libCols = "id,name,kind,restricted,scraper,paths,trickplay,sort_order,created_at,last_scan_at"
 
 func scanLib(row interface{ Scan(...any) error }) (*Library, error) {
 	var l Library
 	var paths string
-	err := row.Scan(&l.ID, &l.Name, &l.Kind, &l.Restricted, &l.Scraper, &paths, &l.SortOrder, &l.CreatedAt, &l.LastScanAt)
+	err := row.Scan(&l.ID, &l.Name, &l.Kind, &l.Restricted, &l.Scraper, &paths, &l.Trickplay, &l.SortOrder, &l.CreatedAt, &l.LastScanAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -61,8 +62,8 @@ func (d *DB) LibraryByID(ctx context.Context, id int64) (*Library, error) {
 
 func (d *DB) CreateLibrary(ctx context.Context, l *Library) (int64, error) {
 	paths, _ := json.Marshal(l.Paths)
-	res, err := d.W.ExecContext(ctx, "INSERT INTO libraries(name,kind,restricted,scraper,paths,sort_order,created_at) VALUES(?,?,?,?,?,?,?)",
-		l.Name, l.Kind, l.Restricted, l.Scraper, string(paths), l.SortOrder, now())
+	res, err := d.W.ExecContext(ctx, "INSERT INTO libraries(name,kind,restricted,scraper,paths,trickplay,sort_order,created_at) VALUES(?,?,?,?,?,?,?,?)",
+		l.Name, l.Kind, l.Restricted, l.Scraper, string(paths), l.Trickplay, l.SortOrder, now())
 	if err != nil {
 		return 0, err
 	}
@@ -71,8 +72,8 @@ func (d *DB) CreateLibrary(ctx context.Context, l *Library) (int64, error) {
 
 func (d *DB) UpdateLibrary(ctx context.Context, l *Library) error {
 	paths, _ := json.Marshal(l.Paths)
-	_, err := d.W.ExecContext(ctx, "UPDATE libraries SET name=?,kind=?,restricted=?,scraper=?,paths=?,sort_order=? WHERE id=?",
-		l.Name, l.Kind, l.Restricted, l.Scraper, string(paths), l.SortOrder, l.ID)
+	_, err := d.W.ExecContext(ctx, "UPDATE libraries SET name=?,kind=?,restricted=?,scraper=?,paths=?,trickplay=?,sort_order=? WHERE id=?",
+		l.Name, l.Kind, l.Restricted, l.Scraper, string(paths), l.Trickplay, l.SortOrder, l.ID)
 	return err
 }
 

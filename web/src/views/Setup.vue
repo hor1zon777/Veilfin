@@ -101,7 +101,7 @@ const libs = ref([])
 const adding = ref(false)
 const newLib = ref(null)
 function resetLib() {
-  newLib.value = { id: 0, name: '自制视频', kind: 'home', restricted: false, scraper: 'none', paths: [''], sortOrder: libs.value.length }
+  newLib.value = { id: 0, name: '自制视频', kind: 'home', restricted: false, scraper: 'none', trickplay: false, paths: [''], sortOrder: libs.value.length }
 }
 async function loadLibs() {
   try {

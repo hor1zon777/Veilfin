@@ -254,6 +254,12 @@ ALTER TABLE users ADD COLUMN token_gen INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN last_failed_at INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN pin_last_failed_at INTEGER NOT NULL DEFAULT 0;
 `,
+	// v4：进度条预览图改为按媒体库开关。已有的媒体库沿用原来的全局设置（没有保存过设置时为开启）
+	`
+ALTER TABLE libraries ADD COLUMN trickplay INTEGER NOT NULL DEFAULT 1;
+UPDATE libraries SET trickplay = 0
+  WHERE (SELECT json_extract(value, '$.trickplayEnabled') FROM settings WHERE key = 'config') = 0;
+`,
 }
 
 func (d *DB) migrate() error {

@@ -152,9 +152,28 @@ func (t *Tools) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 // 新版 ffmpeg 的 MJPEG 编码器会直接拒绝；用 -strict unofficial 绕过则会写出颜色发灰的非标准 JPEG。
 const jpegFormat = "format=yuvj420p"
 
-// Frame 截取 at 秒处的一帧，输出 JPEG（宽度 width，0 表示原尺寸）。
+// Frame 精确截取 at 秒处的一帧，输出 JPEG（宽度 width，0 表示原尺寸）。
+// 需要从前一个关键帧解码到 at，用于手动挑选画面。
 func (t *Tools) Frame(ctx context.Context, path string, at float64, width int) ([]byte, error) {
-	args := []string{"-v", "error", "-ss", strconv.FormatFloat(math.Max(at, 0), 'f', 3, 64), "-i", path, "-frames:v", "1"}
+	return t.frame(ctx, path, at, width, false)
+}
+
+// KeyFrame 截取 at 秒之前最近的关键帧，输出 JPEG（宽度 width，0 表示原尺寸）。
+// 只读取并解码这一帧，不解码到精确时间点，用于自动截封面。
+func (t *Tools) KeyFrame(ctx context.Context, path string, at float64, width int) ([]byte, error) {
+	return t.frame(ctx, path, at, width, true)
+}
+
+func (t *Tools) frame(ctx context.Context, path string, at float64, width int, key bool) ([]byte, error) {
+	args := []string{"-v", "error"}
+	if key {
+		args = append(args, "-noaccurate_seek")
+	}
+	args = append(args, "-ss", strconv.FormatFloat(math.Max(at, 0), 'f', 3, 64))
+	if key {
+		args = append(args, "-skip_frame", "nokey")
+	}
+	args = append(args, "-i", path, "-an", "-sn", "-dn", "-frames:v", "1")
 	vf := "scale=out_range=pc," + jpegFormat
 	if width > 0 {
 		vf = fmt.Sprintf("scale='min(%d,iw)':-2:out_range=pc,", width) + jpegFormat
@@ -211,8 +230,9 @@ func (t *Tools) TrickFrame(ctx context.Context, path string, at float64, w, h in
 }
 
 // Trickplay 生成进度条预览雪碧图。每个时间点单独跳转截取一帧（见 TrickFrame），parallel 个 ffmpeg 并行；
-// 每拼好一张雪碧图就以 JPEG 调用 save（按顺序）。返回最终的布局信息。
-func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw, vh, parallel int, save func(sprite []byte) error) (*TrickplayInfo, error) {
+// 每拼好一张雪碧图就以 JPEG 调用 save（按顺序）；progress（可为 nil）在每截完一个时间点后报告进度。
+// 返回最终的布局信息。
+func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw, vh, parallel int, save func(sprite []byte) error, progress func(done, total int)) (*TrickplayInfo, error) {
 	if duration <= 0 {
 		return nil, errors.New("时长未知，无法生成预览图")
 	}
@@ -224,7 +244,7 @@ func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw
 	for sh := 0; sh < sheets; sh++ {
 		start := sh * per
 		n := min(per, info.Count-start)
-		frames, firstErr := t.trickFrames(ctx, path, info, start, n, parallel, sh == 0)
+		frames, firstErr := t.trickFrames(ctx, path, info, start, n, parallel, sh == 0, progress)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -282,7 +302,7 @@ func (t *Tools) Trickplay(ctx context.Context, path string, duration float64, vw
 
 // trickFrames 并行截取第 start 张起的 n 张缩略图，失败的位置为 nil。
 // probe 为 true 时（第一张雪碧图），前几张全部失败就提前放弃（多半是解码器不支持或文件损坏）。
-func (t *Tools) trickFrames(ctx context.Context, path string, info TrickplayInfo, start, n, parallel int, probe bool) ([]image.Image, error) {
+func (t *Tools) trickFrames(ctx context.Context, path string, info TrickplayInfo, start, n, parallel int, probe bool, progress func(done, total int)) ([]image.Image, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	frames := make([]image.Image, n)
@@ -323,6 +343,9 @@ func (t *Tools) trickFrames(ctx context.Context, path string, info TrickplayInfo
 					oks++
 					frames[i] = img
 				}
+				if progress != nil {
+					progress(start+oks+fails, info.Count)
+				}
 				mu.Unlock()
 			}
 		}()
@@ -334,6 +357,55 @@ func (t *Tools) trickFrames(ctx context.Context, path string, info TrickplayInfo
 // ExtractSubtitle 把内嵌文本字幕流转换成 WebVTT。
 func (t *Tools) ExtractSubtitle(ctx context.Context, path string, index int) ([]byte, error) {
 	return run(ctx, 5*time.Minute, nil, t.FFmpeg, "-v", "error", "-i", path, "-map", "0:"+strconv.Itoa(index), "-f", "webvtt", "pipe:1")
+}
+
+// ExtractSubtitles 一次读取文件，同时把多条内嵌文本字幕流转换成 WebVTT，返回 流序号 → 内容。
+// 字幕数据分散在整个文件里，每提取一条都要把文件读一遍；合在一个 ffmpeg 里只需要读一遍。
+// 合并提取失败时（例如某条字幕流损坏）退回逐条提取，失败的那条不出现在结果里。
+func (t *Tools) ExtractSubtitles(ctx context.Context, path string, indexes []int) (map[int][]byte, error) {
+	out := map[int][]byte{}
+	if len(indexes) == 0 {
+		return out, nil
+	}
+	if len(indexes) > 1 {
+		dir, err := os.MkdirTemp("", "vf-subs-*")
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(dir)
+		args := []string{"-v", "error", "-i", path}
+		for _, i := range indexes {
+			args = append(args, "-map", "0:"+strconv.Itoa(i), "-f", "webvtt", "-y", filepath.Join(dir, strconv.Itoa(i)+".vtt"))
+		}
+		if _, err := run(ctx, 30*time.Minute, nil, t.FFmpeg, args...); err == nil {
+			for _, i := range indexes {
+				if b, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(i)+".vtt")); err == nil {
+					out[i] = b
+				}
+			}
+			return out, nil
+		} else if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	var firstErr error
+	for _, i := range indexes {
+		b, err := t.ExtractSubtitle(ctx, path, i)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out[i] = b
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // ConvertSubtitle 把外挂字幕（srt/ass/ssa/vtt）转换成 UTF-8 的 WebVTT，自动处理 GBK / UTF-16 编码。

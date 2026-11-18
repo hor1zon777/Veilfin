@@ -559,6 +559,8 @@ try {
   await pathInput.type(media2)
   const restrictedChecked = await dlg.$eval('input[type=checkbox]', (c) => c.checked)
   ok(restrictedChecked, '管理后台：选择“日本影片”类型时自动勾选“受限”')
+  const checks = await dlg.$$eval('input[type=checkbox]', (cs) => cs.map((c) => c.checked))
+  ok(checks.length === 2 && checks[1] === false, `管理后台：媒体库表单有“生成进度条预览图”开关，日本影片默认不勾选（${JSON.stringify(checks)}）`)
   await shot(page, 'web-admin-add-library')
   await page.click('.dialog footer .btn.primary')
   await page.waitForFunction(() => !document.querySelector('.dialog'), { timeout: 10000 })
@@ -724,18 +726,54 @@ try {
   })
   ok(layout.time && !layout.oldTime, `移动端：时间显示在进度条上方并左对齐（${JSON.stringify(layout)}）`)
   ok(layout.centered && layout.fits, `移动端：控制按钮在底部居中且不超出屏幕（${JSON.stringify(layout)}）`)
+  // 后退 / 播放暂停 / 前进不在底部，而是在画面中央弹出
+  const center = await mp.evaluate(() => {
+    const r = (s) => document.querySelector(s)?.getBoundingClientRect()
+    const play = r('.m-center .m-play')
+    const p = r('.player')
+    return {
+      inBottom: !!document.querySelector('.controls .big'),
+      play: !!play,
+      centered: !!play && Math.abs(play.left + play.width / 2 - (p.left + p.width / 2)) < 3 && Math.abs(play.top + play.height / 2 - (p.top + p.height / 2)) < 3,
+      skips: document.querySelectorAll('.m-center .m-skip').length,
+    }
+  })
+  ok(!center.inBottom && center.play && center.centered && center.skips === 2, `移动端：后退 / 播放暂停 / 前进在画面中央（${JSON.stringify(center)}）`)
   await shot(mp, 'web-mobile-player')
+  // 轻点画面上部的空白处（避开中央按钮）
+  const tapBlank = async () => {
+    const vp = mp.viewport()
+    await mp.touchscreen.tap(vp.width / 2, Math.round(vp.height * 0.3))
+  }
+  const st = () => mp.evaluate(() => ({ paused: document.querySelector('video').paused, hidden: !!document.querySelector('.player.hide-ui') }))
   await mp.evaluate(() => document.querySelector('video').play())
-  if (await mp.$('.player.hide-ui')) await mp.tap('.player')
+  if (await mp.$('.player.hide-ui')) await tapBlank()
   await sleep(300)
-  await mp.tap('.player')
+  await tapBlank()
   await sleep(400)
-  const afterTap = await mp.evaluate(() => ({ paused: document.querySelector('video').paused, hidden: !!document.querySelector('.player.hide-ui') }))
+  const afterTap = await st()
   ok(!afterTap.paused && afterTap.hidden, `移动端：播放中轻点画面不暂停，只隐藏控制栏（${JSON.stringify(afterTap)}）`)
-  await mp.tap('.player')
+  // 控制栏收起时，中央按钮不响应点击，点到的是画面
+  const hiddenHit = await mp.evaluate(() => {
+    const b = document.querySelector('.m-play').getBoundingClientRect()
+    return document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)?.tagName
+  })
+  ok(hiddenHit === 'VIDEO', `移动端：控制栏收起时中央按钮不拦截点击（点到 ${hiddenHit}）`)
+  await tapBlank()
   await sleep(400)
-  const afterTap2 = await mp.evaluate(() => ({ paused: document.querySelector('video').paused, hidden: !!document.querySelector('.player.hide-ui') }))
+  const afterTap2 = await st()
   ok(!afterTap2.paused && !afterTap2.hidden, `移动端：再次轻点唤出控制栏，仍在播放（${JSON.stringify(afterTap2)}）`)
+  await mp.tap('.m-center .m-play')
+  await sleep(400)
+  const paused = await st()
+  ok(paused.paused && !paused.hidden, `移动端：点中央按钮暂停，暂停时控制栏保持显示（${JSON.stringify(paused)}）`)
+  await sleep(3500)
+  ok(!(await st()).hidden, '移动端：暂停 3 秒后控制栏仍然显示')
+  await mp.tap('.m-center .m-play')
+  await sleep(400)
+  ok(!(await st()).paused, '移动端：再点中央按钮继续播放')
+  await sleep(3800)
+  ok((await st()).hidden, '移动端：播放中 3 秒后控制栏自动收起')
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
 

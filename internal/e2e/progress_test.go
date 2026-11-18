@@ -63,7 +63,7 @@ func TestScanProgress(t *testing.T) {
 	var lib struct {
 		ID int64 `json:"id"`
 	}
-	admin.must("admin.libs.create", map[string]any{"name": "进度", "kind": "home", "scraper": "none", "paths": []string{dir}}, &lib)
+	admin.must("admin.libs.create", map[string]any{"name": "进度", "kind": "home", "scraper": "none", "trickplay": true, "paths": []string{dir}}, &lib)
 	p, phases := waitScan(t, admin, lib.ID)
 	if p.Phase != "done" || p.Found != 3 || p.Added != 3 || p.Total != 3 || p.Done != 3 || p.Failed != 0 {
 		t.Fatalf("首次扫描进度不正确: %+v", p)

@@ -48,10 +48,19 @@ func exerciseTools(t *testing.T, tl *Tools) {
 		if err != nil || jpegWidth(t, full) != 320 {
 			t.Fatalf("原尺寸截图失败: %v", err)
 		}
+		key, err := tl.KeyFrame(ctx, p, 7.5, 160)
+		if err != nil || jpegWidth(t, key) != 160 {
+			t.Fatalf("关键帧截图失败: %v", err)
+		}
 		var files [][]byte
-		info, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 4, func(b []byte) error { files = append(files, b); return nil })
+		var maxDone, total int
+		info, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 4, func(b []byte) error { files = append(files, b); return nil },
+			func(d, n int) { maxDone, total = max(maxDone, d), n })
 		if err != nil {
 			t.Fatal(err)
+		}
+		if maxDone != 2 || total != 2 {
+			t.Fatalf("进度报告不正确: %d/%d", maxDone, total)
 		}
 		// 12 秒的视频每 10 秒一张：两张缩略图，雪碧图只有一行两列
 		if len(files) != 1 || info.Count != 2 || info.Height != 136 {
@@ -91,13 +100,13 @@ func exerciseTools(t *testing.T, tl *Tools) {
 			t.Fatalf("HEVC 截图失败: %v", err)
 		}
 		n := 0
-		if _, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 2, func([]byte) error { n++; return nil }); err != nil || n != 1 {
+		if _, err := tl.Trickplay(ctx, p, r.Duration, r.Width, r.Height, 2, func([]byte) error { n++; return nil }, nil); err != nil || n != 1 {
 			t.Fatalf("HEVC 预览图失败: %v", err)
 		}
 	})
 
 	t.Run("截不到画面", func(t *testing.T) {
-		_, err := tl.Trickplay(ctx, filepath.Join("testdata", "external.srt"), 30, 320, 180, 2, func([]byte) error { return nil })
+		_, err := tl.Trickplay(ctx, filepath.Join("testdata", "external.srt"), 30, 320, 180, 2, func([]byte) error { return nil }, nil)
 		if err == nil {
 			t.Fatal("不是视频的文件应该生成失败")
 		}
@@ -119,6 +128,38 @@ func exerciseTools(t *testing.T, tl *Tools) {
 		vtt, err := tl.ExtractSubtitle(ctx, p, r.Subs[0].Index)
 		if err != nil || !strings.Contains(string(vtt), "WebM 字幕测试") {
 			t.Fatalf("WebM 字幕提取失败: %v\n%s", err, vtt)
+		}
+	})
+
+	t.Run("多条内嵌字幕一次提取", func(t *testing.T) {
+		p := filepath.Join("testdata", "multisubs.mp4")
+		r, err := tl.Probe(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var idx []int
+		for _, s := range r.Subs {
+			if s.Text {
+				idx = append(idx, s.Index)
+			}
+		}
+		if len(idx) != 3 {
+			t.Fatalf("字幕流不正确: %+v", r.Subs)
+		}
+		got, err := tl.ExtractSubtitles(ctx, p, idx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[int]string{idx[0]: "第二句字幕", idx[1]: "ASS 外挂字幕", idx[2]: "第二条字幕流"}
+		for i, w := range want {
+			if v := string(got[i]); !strings.HasPrefix(v, "WEBVTT") || !strings.Contains(v, w) {
+				t.Fatalf("字幕流 %d 不正确:\n%s", i, v)
+			}
+		}
+		// 其中一条无法提取时，退回逐条提取，其余的照常返回
+		got, err = tl.ExtractSubtitles(ctx, p, []int{idx[0], 99, idx[2]})
+		if err != nil || len(got) != 2 || got[idx[0]] == nil || got[idx[2]] == nil {
+			t.Fatalf("逐条提取的退路不正确: %v %d", err, len(got))
 		}
 	})
 

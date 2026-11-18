@@ -128,6 +128,15 @@ func (q *Queue) AddFront(key, label string, fn func(ctx context.Context) error) 
 	q.cond.Signal()
 }
 
+// SetLabel 更新正在运行的任务的显示名称（用于显示进度）；任务不在运行时忽略。
+func (q *Queue) SetLabel(key, label string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.running[key]; ok {
+		q.running[key] = label
+	}
+}
+
 func (q *Queue) worker(ctx context.Context) {
 	defer q.wg.Done()
 	for {

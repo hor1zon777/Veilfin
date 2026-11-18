@@ -86,7 +86,7 @@ onBeforeUnmount(() => {
 })
 
 function openNew() {
-  edit.value = { id: 0, name: '', kind: 'home', restricted: false, scraper: 'none', paths: [''], sortOrder: libs.value.length }
+  edit.value = { id: 0, name: '', kind: 'home', restricted: false, scraper: 'none', trickplay: false, paths: [''], sortOrder: libs.value.length }
 }
 function openEdit(l) {
   edit.value = { ...l, paths: [...l.paths] }
@@ -145,7 +145,7 @@ async function doDelete() {
       <div v-for="(l, i) in libs" :key="l.id" class="card-panel lib" :class="{ scanning: isActive(progress[l.id]) }" :style="{ '--i': i }">
         <div class="lhead">
           <h2>{{ l.name }} <Icon v-if="l.restricted" name="lock" :size="16" class="muted" /></h2>
-          <span class="muted">{{ kindNames[l.kind] }} · {{ l.count }} 个视频 · {{ scraperNames[l.scraper] }}</span>
+          <span class="muted">{{ kindNames[l.kind] }} · {{ l.count }} 个视频 · {{ scraperNames[l.scraper] }}{{ l.trickplay ? ' · 生成进度条预览图' : '' }}</span>
         </div>
         <div v-for="p in l.paths" :key="p" class="path">{{ p }}</div>
         <div class="muted small">上次扫描：{{ l.lastScanAt ? fmtDateTime(l.lastScanAt) : '从未' }}</div>

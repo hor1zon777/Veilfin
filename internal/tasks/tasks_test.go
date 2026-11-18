@@ -125,3 +125,33 @@ func TestAddFront(t *testing.T) {
 		t.Fatalf("执行顺序 %s", got)
 	}
 }
+
+// SetLabel 只更新正在运行的任务，状态里显示新名称。
+func TestSetLabel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	q := New(ctx, "test", 1)
+	defer func() {
+		cancel()
+		q.Stopped()
+	}()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	q.Add("a", "任务 A", func(context.Context) error {
+		close(started)
+		<-release
+		return nil
+	})
+	<-started
+	q.Add("b", "任务 B", func(context.Context) error { return nil })
+	q.SetLabel("a", "任务 A · 3/10")
+	q.SetLabel("b", "排队中的不改")
+	if st := q.Status(); len(st.Running) != 1 || st.Running[0] != "任务 A · 3/10" {
+		t.Fatalf("运行中的任务名称 %v", st.Running)
+	}
+	close(release)
+	q.Wait(context.Background())
+	q.SetLabel("a", "已结束的不改")
+	if st := q.Status(); len(st.Running) != 0 {
+		t.Fatalf("结束后仍有运行中的任务 %v", st.Running)
+	}
+}

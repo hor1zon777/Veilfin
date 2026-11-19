@@ -65,19 +65,19 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
       <div class="spacer" />
       <button class="btn primary" @click="openNew">添加用户</button>
     </div>
-    <div class="card-panel">
+    <div class="card-panel users">
       <table class="list">
         <thead><tr><th>用户名</th><th>角色</th><th>可访问的媒体库</th><th>PIN</th><th>最近登录</th><th></th></tr></thead>
         <tbody>
           <tr v-for="(u, i) in users" :key="u.id" class="fade" :style="{ '--i': i }">
-            <td>{{ u.username }} <span v-if="u.id === state.me.id" class="muted">（你）</span></td>
-            <td>
-              <span v-if="u.disabled" class="err">已禁用</span>
-              <span v-else>{{ u.isAdmin ? '管理员' : '普通用户' }}</span>
+            <td class="name">{{ u.username }} <span v-if="u.id === state.me.id" class="muted">（你）</span></td>
+            <td class="role">
+              <span v-if="u.disabled" class="tag err">已禁用</span>
+              <span v-else class="tag" :class="{ admin: u.isAdmin }">{{ u.isAdmin ? '管理员' : '普通用户' }}</span>
             </td>
-            <td class="libs">{{ u.isAdmin ? '全部' : u.libraries.map(libName).join('、') || '无' }}</td>
-            <td>{{ u.hasPin ? '已设置' : '—' }}</td>
-            <td class="muted">{{ u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '从未' }}</td>
+            <td class="libs" data-label="媒体库">{{ u.isAdmin ? '全部' : u.libraries.map(libName).join('、') || '无' }}</td>
+            <td class="pin" data-label="PIN">{{ u.hasPin ? '已设置' : '—' }}</td>
+            <td class="login muted" data-label="最近登录">{{ u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '从未' }}</td>
             <td class="ops">
               <button class="btn ghost" @click="openEdit(u)">编辑</button>
               <button v-if="u.id !== state.me.id" class="btn ghost err" @click="del = u">删除</button>
@@ -129,4 +129,34 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
 .libs { max-width: 320px; }
 .ops { text-align: right; white-space: nowrap; }
 .field .check { margin-bottom: 4px; }
+
+/* 移动端：表格改为一人一张卡片
+   用户名        角色
+   媒体库：……
+   PIN：……       编辑 删除
+   最近登录：…… */
+@media (max-width: 600px) {
+  .head { gap: 8px 10px; }
+  .head > .muted { flex-basis: 100%; font-size: 13px; }
+  .head .btn { width: 100%; justify-content: center; }
+  .card-panel.users { padding: 2px 14px; }
+  table.list, table.list tbody { display: block; }
+  table.list thead { display: none; }
+  table.list tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name role' 'libs libs' 'pin ops' 'login ops';
+    gap: 4px 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  table.list tr:last-child { border-bottom: 0; }
+  table.list td, table.list tr:hover td { padding: 0; border: 0; background: none; min-width: 0; }
+  .name { grid-area: name; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+  .role { grid-area: role; align-self: center; justify-self: end; }
+  .libs { grid-area: libs; max-width: none; margin-top: 2px; }
+  .pin { grid-area: pin; }
+  .login { grid-area: login; }
+  .libs, .pin, .login { font-size: 13px; overflow-wrap: anywhere; }
+  td[data-label]::before { content: attr(data-label) '：'; color: var(--muted); }
+  .ops { grid-area: ops; align-self: end; display: flex; gap: 4px; }
+  .ops .btn { height: 32px; padding: 0 12px; background: var(--panel2); }
+  .tag { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--panel2); font-size: 12px; line-height: 20px; white-space: nowrap; }
+  .tag.admin { background: rgba(82,181,75,.18); color: var(--accent); }
+  .tag.err { background: rgba(255,107,107,.15); }
+}
 </style>

@@ -920,6 +920,37 @@ try {
     const toPlay = await mp.waitForFunction(() => location.hash.startsWith('#/play/'), { timeout: 5000 }).then(() => true).catch(() => false)
     ok(shown && toPlay, `移动端：卡片选中后点播放键直接进入播放页（播放键已显示 ${shown}，进入播放页 ${toPlay}）`)
   }
+  // ---- 移动端管理后台 - 用户页：表格改为一人一张卡片，不出现横向滚动 ----
+  {
+    await mp.goto(webBase + '/#/admin/users', { waitUntil: 'networkidle2' })
+    await mp.waitForSelector('table.list tbody tr')
+    // 在手机上添加一个普通用户（顺带验证弹窗表单在小屏上可用）
+    await mp.$$eval('.head .btn.primary', (b) => b[0].click())
+    await mp.waitForSelector('.dialog input.input')
+    const [nameInput, pwInput] = await mp.$$('.dialog input.input')
+    await nameInput.type('mobile-user-with-long-name')
+    await pwInput.type('mobile-password-1')
+    await mp.$$eval('.dialog footer .btn.primary', (b) => b[0].click())
+    await mp.waitForFunction(() => document.querySelectorAll('table.list tbody tr').length >= 2 && !document.querySelector('.dialog'), { timeout: 8000 }).catch(() => {})
+    await sleep(800)
+    const ul = await mp.evaluate(() => {
+      const rows = [...document.querySelectorAll('table.list tbody tr')]
+      const inView = (e) => {
+        const r = e.getBoundingClientRect()
+        return r.left >= 0 && r.right <= innerWidth + 0.5
+      }
+      return {
+        rows: rows.length,
+        noHScroll: document.documentElement.scrollWidth <= innerWidth,
+        headHidden: getComputedStyle(document.querySelector('table.list thead')).display === 'none',
+        cards: rows.every((r) => getComputedStyle(r).display === 'grid'),
+        fits: rows.every((r) => [...r.querySelectorAll('td, .btn')].every(inView)),
+        labels: getComputedStyle(rows[0].querySelector('td.libs'), '::before').content,
+      }
+    })
+    ok(ul.rows >= 2 && ul.noHScroll && ul.headHidden && ul.cards && ul.fits && ul.labels.includes('媒体库'), `移动端：用户页显示为卡片、内容不超出屏幕（${JSON.stringify(ul)}）`)
+    await shot(mp, 'web-mobile-admin-users')
+  }
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
 

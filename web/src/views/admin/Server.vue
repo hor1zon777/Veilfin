@@ -161,6 +161,7 @@ async function save() {
 .settings { max-width: 760px; display: grid; gap: 14px; }
 h2 { font-size: 16px; margin-bottom: 14px; }
 .short { max-width: 200px; }
+select.short { width: auto; max-width: 100%; }
 .check { display: flex; margin-bottom: 8px; }
 .sub { margin: 2px 0 12px 24px; }
 .warn { color: var(--warn); margin-bottom: 14px; }

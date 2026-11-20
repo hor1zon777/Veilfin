@@ -60,6 +60,7 @@ textarea.input { resize: vertical; min-height: 90px; }
 /* 页面容器 */
 .page { padding: calc(var(--topbar) + 20px) 3.5vw 48px; min-height: 100vh; }
 .page-title { font-size: 26px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; }
+.page-title .btn { font-size: 14px; }
 .section-title { font-size: 19px; margin: 28px 0 12px; display: flex; align-items: center; gap: 10px; }
 .section-title a:hover { color: var(--accent); }
 .card-panel { background: var(--panel); border-radius: 12px; padding: 20px; animation: rise-in .5s var(--spring) backwards; animation-delay: calc(var(--i, 0) * 50ms); }
@@ -86,6 +87,10 @@ table.list th, table.list td { text-align: left; padding: 10px 12px; border-bott
 table.list th { color: var(--muted); font-weight: normal; font-size: 13px; }
 table.list td { transition: background-color .2s; }
 table.list tr:hover td { background: rgba(255,255,255,.03); }
+@media (max-width: 600px) {
+  table.list th, table.list td { padding: 10px 8px; }
+  table.list th { white-space: nowrap; }
+}
 
 /* 下拉菜单 */
 .menu { position: absolute; z-index: 60; min-width: 180px; background: rgba(36,36,36,.82); border: 0.5px solid rgba(255,255,255,.1); border-radius: 12px;

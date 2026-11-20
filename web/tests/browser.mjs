@@ -951,6 +951,46 @@ try {
     ok(ul.rows >= 2 && ul.noHScroll && ul.headHidden && ul.cards && ul.fits && ul.labels.includes('媒体库'), `移动端：用户页显示为卡片、内容不超出屏幕（${JSON.stringify(ul)}）`)
     await shot(mp, 'web-mobile-admin-users')
   }
+  // ---- 移动端：类型页改为一行一个类型，名称不会被挤成一列；其他页面内容都不超出屏幕 ----
+  {
+    await mp.goto(webBase + '/#/admin/genres', { waitUntil: 'networkidle2' })
+    await mp.waitForSelector('table.list tbody tr td.name')
+    await sleep(600)
+    const gl = await mp.evaluate(() => {
+      const r = document.querySelector('table.list tbody tr')
+      const name = r.querySelector('td.name').getBoundingClientRect()
+      const ops = [...r.querySelectorAll('.ops .btn')].map((b) => b.getBoundingClientRect())
+      return { nameW: Math.round(name.width), oneLine: name.height < 30, opsIn: ops.every((b) => b.right <= innerWidth), selectAll: getComputedStyle(document.querySelector('th.sel'), '::after').content }
+    })
+    ok(gl.nameW > 120 && gl.oneLine && gl.opsIn && gl.selectAll.includes('全选'), `移动端：类型页名称有足够宽度、操作按钮在屏幕内（${JSON.stringify(gl)}）`)
+    await shot(mp, 'web-mobile-admin-genres')
+    const overflow = []
+    for (const path of ['/', '/library/1', '/search?q=家庭', '/history', '/settings', '/admin', '/admin/libraries', '/admin/genres', '/admin/server', '/admin/backup', '/admin/update']) {
+      await mp.goto(webBase + '/#' + path, { waitUntil: 'networkidle2' })
+      await sleep(800)
+      // 超出屏幕右侧、且没有被可滚动 / 裁剪的祖先（标签栏、横向列表）包住的元素
+      const bad = await mp.evaluate(() => {
+        const W = innerWidth
+        const out = []
+        for (const e of document.querySelectorAll('.page *')) {
+          const r = e.getBoundingClientRect()
+          if (!r.width || r.right <= W + 1 || e.closest('.overlay')) continue
+          let clipped = false
+          for (let a = e.parentElement; a && a !== document.body && !clipped; a = a.parentElement) {
+            clipped = getComputedStyle(a).overflowX !== 'visible' && a.getBoundingClientRect().right <= W + 1
+          }
+          if (!clipped) out.push(e.tagName + '.' + e.getAttribute('class'))
+        }
+        return out.slice(0, 3)
+      })
+      if (bad.length) overflow.push(`${path}: ${bad.join(', ')}`)
+    }
+    ok(!overflow.length, '移动端：各页面内容都不超出屏幕' + (overflow.length ? '\n      ' + overflow.join('\n      ') : ''))
+    await mp.goto(webBase + '/#/history', { waitUntil: 'networkidle2' })
+    await mp.waitForSelector('.page-title .btn', { timeout: 8000 }).catch(() => {})
+    const clearFs = await mp.$eval('.page-title .btn', (b) => getComputedStyle(b).fontSize).catch(() => '')
+    ok(clearFs === '14px', `观看记录页标题里的“清空”按钮使用正常字号（${clearFs}）`)
+  }
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
 

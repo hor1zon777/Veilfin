@@ -103,7 +103,7 @@ async function doDelete() {
 
     <div v-if="!list" class="loading"><div class="spinner" /></div>
     <div v-else-if="!list.length" class="empty">还没有任何类型，刮削或编辑条目后会出现在这里</div>
-    <div v-else class="card-panel">
+    <div v-else class="card-panel genres">
       <table class="list">
         <thead>
           <tr>
@@ -116,7 +116,7 @@ async function doDelete() {
         <tbody>
           <tr v-for="(g, i) in shown" :key="g.name" class="fade" :style="{ '--i': Math.min(i, 15) }">
             <td class="sel"><input v-model="selected" type="checkbox" :value="g.name" /></td>
-            <td>{{ g.name }}</td>
+            <td class="name">{{ g.name }}</td>
             <td class="num">{{ g.count }}</td>
             <td class="ops">
               <button class="btn ghost" @click="openRename(g)">重命名</button>
@@ -174,4 +174,30 @@ table.list th.num { text-align: right; }
 .ops { text-align: right; white-space: nowrap; }
 .pick { cursor: pointer; transition: background-color 0.2s, color 0.2s; }
 .pick:hover, .pick.on { background: var(--accent); color: #fff; }
+
+/* 移动端：表格改为一行一个类型
+   ☐ 类型名称              重命名 删除
+     N 个条目
+   表头只保留“全选” */
+@media (max-width: 600px) {
+  .search { max-width: none; flex: 1; min-width: 0; }
+  .card-panel.genres { padding: 2px 14px; }
+  table.list, table.list thead, table.list tbody { display: block; }
+  table.list tr { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; grid-template-areas: 'sel name ops' 'sel num ops'; align-items: center;
+    column-gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  table.list tbody tr:last-child { border-bottom: 0; }
+  table.list th, table.list td, table.list tr:hover td { padding: 0; border: 0; background: none; min-width: 0; }
+  table.list thead tr { grid-template-areas: 'sel name'; padding: 10px 0; }
+  table.list thead th:not(.sel) { display: none; }
+  table.list th.sel { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  table.list th.sel::after { content: '全选'; }
+  .sel { grid-area: sel; width: auto; }
+  .name { grid-area: name; font-size: 15px; overflow-wrap: anywhere; }
+  .num { grid-area: num; width: auto; text-align: left; color: var(--muted); font-size: 12.5px; }
+  .num::after { content: ' 个条目'; }
+  .ops { grid-area: ops; display: flex; gap: 2px; }
+  .ops .btn { height: 32px; padding: 0 10px; }
+  /* “没有匹配的类型”这一行 */
+  table.list td[colspan] { grid-column: 1 / -1; }
+}
 </style>

@@ -168,8 +168,8 @@ const peak = computed(() => values.value.reduce((best, v, i) => (v > values.valu
           <thead><tr><th>用户</th><th>观看时长</th><th>次数</th><th>最近播放</th></tr></thead>
           <tbody>
             <tr v-for="u in stats.users" :key="u.userId">
-              <td>{{ u.username }}</td><td>{{ fmtWatch(u.watched) }}</td><td>{{ u.plays }}</td>
-              <td class="muted">{{ u.lastPlay ? fmtDateTime(u.lastPlay) : '—' }}</td>
+              <td>{{ u.username }}</td><td class="n">{{ fmtWatch(u.watched) }}</td><td class="n">{{ u.plays }}</td>
+              <td class="muted n">{{ u.lastPlay ? fmtDateTime(u.lastPlay) : '—' }}</td>
             </tr>
           </tbody>
         </table>
@@ -178,7 +178,7 @@ const peak = computed(() => values.value.reduce((best, v, i) => (v > values.valu
           <thead><tr><th>标题</th><th>次数</th><th>观看时长</th></tr></thead>
           <tbody>
             <tr v-for="t in stats.top" :key="t.itemId">
-              <td><router-link :to="`/item/${t.itemId}`" class="lnk">{{ t.title }}</router-link></td><td>{{ t.plays }}</td><td>{{ fmtWatch(t.watched) }}</td>
+              <td><router-link :to="`/item/${t.itemId}`" class="lnk">{{ t.title }}</router-link></td><td class="n">{{ t.plays }}</td><td class="n">{{ fmtWatch(t.watched) }}</td>
             </tr>
             <tr v-if="!stats.top?.length"><td colspan="3" class="muted">暂无数据</td></tr>
           </tbody>
@@ -242,6 +242,7 @@ h2 { font-size: 16px; }
 .tt-day { color: var(--muted); margin-bottom: 2px; }
 .xaxis { height: 22px; display: flex; justify-content: space-between; align-items: flex-end; font-size: 11px; color: var(--muted); }
 .table-wrap { max-height: 320px; overflow-y: auto; }
+.n { white-space: nowrap; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
 .lnk:hover { color: var(--accent); }

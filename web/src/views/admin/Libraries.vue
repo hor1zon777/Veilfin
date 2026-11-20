@@ -189,6 +189,11 @@ async function doDelete() {
 .head { margin-bottom: 14px; }
 .libs { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; }
 @media (max-width: 500px) { .libs { grid-template-columns: 1fr; } }
+@media (max-width: 600px) {
+  .head .btn { width: 100%; justify-content: center; }
+  .ops { gap: 6px; }
+  .ops .btn { padding: 0 10px; }
+}
 .lhead { margin-bottom: 8px; }
 .lhead h2 { font-size: 18px; display: flex; align-items: center; gap: 6px; }
 .path { font-family: Consolas, monospace; font-size: 12.5px; color: #bbb; word-break: break-all; padding: 2px 0; }

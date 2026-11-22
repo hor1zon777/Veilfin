@@ -257,7 +257,7 @@ function report(final) {
 function onTime() {
   const v = video.value
   if (!v) return // 卸载过程中仍可能触发事件
-  if (!dragging) cur.value = v.currentTime // 拖动进度条时显示的是手指 / 鼠标的位置
+  if (!dragging.value) cur.value = v.currentTime // 拖动进度条时显示的是手指 / 鼠标的位置
   if (playing.value && Date.now() - lastReport > 10000) report()
 }
 function onProgress() {
@@ -444,7 +444,7 @@ function onTouch() {
   poke()
 }
 function onVideoClick() {
-  if (nativeFs.value) return
+  if (nativeFs.value || dragging.value) return
   if (!mobile) return toggle()
   if (uiBeforeTouch) {
     clearTimeout(hideTimer)
@@ -461,12 +461,12 @@ function showFlash(s) {
   showFlash.t = setTimeout(() => (flash.value = ''), 700)
 }
 
-// 控制栏自动隐藏
+// 控制栏自动隐藏（拖动进度条或打开菜单时不收起）
 function poke() {
   showUI.value = true
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
-    if (playing.value && !menu.value) showUI.value = false
+    if (playing.value && !menu.value && !dragging.value) showUI.value = false
   }, 3000)
 }
 
@@ -478,34 +478,46 @@ function barTime(e) {
 }
 // 按下和拖动时只移动进度条显示，松开时才真正跳转一次：
 // 每次跳转都要重新向服务端请求数据，点一下就跳两次、拖动中途跳转都会白白占用带宽
-let dragging = false
+const dragging = ref(false)
+let dragId = null
 function onBarDown(e) {
-  dragging = true
+  if (dragging.value) return
+  dragging.value = true
+  dragId = e.pointerId
   const b = barTime(e)
   cur.value = b.t
   hover.value = b
+  loadSprites()
+  poke()
   window.addEventListener('pointermove', onBarDrag)
-  window.addEventListener('pointerup', onBarUp, { once: true })
-  window.addEventListener('pointercancel', onBarUp, { once: true })
+  window.addEventListener('pointerup', onBarUp)
+  window.addEventListener('pointercancel', onBarUp)
 }
 function onBarDrag(e) {
-  if (dragging) {
-    const b = barTime(e)
-    cur.value = b.t
-    hover.value = b
-  }
+  if (!dragging.value || e.pointerId !== dragId || !bar.value) return
+  const b = barTime(e)
+  cur.value = b.t
+  hover.value = b
+  poke()
 }
 function onBarUp(e) {
-  if (!dragging) return
-  dragging = false
+  if (!dragging.value || e.pointerId !== dragId) return
+  dragging.value = false
+  dragId = null
   window.removeEventListener('pointermove', onBarDrag)
   window.removeEventListener('pointerup', onBarUp)
   window.removeEventListener('pointercancel', onBarUp)
   if (e.type === 'pointercancel') cur.value = video.value?.currentTime || 0
   else if (bar.value) seek(barTime(e).t, mobile) // 移动端点得不精确，跳到附近关键帧换取更快起播
-  if (mobile) hover.value = null
+  if (mobile || e.pointerType === 'touch' || e.type === 'pointercancel') hover.value = null
+  else if (bar.value) {
+    const r = bar.value.getBoundingClientRect()
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) hover.value = null
+  }
+  poke()
 }
 function onBarMove(e) {
+  if (dragging.value || e.pointerType === 'touch') return
   hover.value = barTime(e)
   loadSprites() // 播放还没开始就先悬停：立即开始预载
 }
@@ -662,6 +674,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKey)
   document.removeEventListener('fullscreenchange', onFsChange)
   window.removeEventListener('pagehide', onUnload)
+  window.removeEventListener('pointermove', onBarDrag)
+  window.removeEventListener('pointerup', onBarUp)
+  window.removeEventListener('pointercancel', onBarUp)
   clearInterval(reportTimer)
   clearInterval(countdownTimer)
   clearTimeout(hideTimer)
@@ -766,7 +781,7 @@ watch(menu, (m) => m && (showUI.value = true))
     <div class="bottom ui" @click.stop>
       <!-- 移动端：时间放在进度条上方、左对齐，按钮整行居中 -->
       <div v-if="mobile" class="m-time">{{ fmtTime(cur) }} / {{ fmtTime(dur) }}</div>
-      <div ref="bar" class="bar" @pointerdown="onBarDown" @pointermove="onBarMove" @pointerleave="hover = null">
+      <div ref="bar" class="bar" :class="{ dragging }" @pointerdown="onBarDown" @pointermove="onBarMove" @pointerleave="!dragging && (hover = null)">
         <div class="track">
           <div v-for="(b, i) in buffered" :key="i" class="buf" :style="{ left: (b[0] / dur) * 100 + '%', width: ((b[1] - b[0]) / dur) * 100 + '%' }" />
           <div class="fill" :style="{ width: pct + '%' }" />
@@ -854,14 +869,14 @@ video::cue { background: rgba(0,0,0,.55); font-size: 1.15em; }
 .bottom { bottom: 0; padding: 40px 22px 14px; background: linear-gradient(transparent, rgba(0,0,0,.85)); }
 .bar { position: relative; height: 22px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
 .track { position: relative; width: 100%; height: 4px; background: rgba(255,255,255,.2); border-radius: 3px; transition: height .3s var(--spring); }
-.bar:hover .track { height: 6px; }
+.bar:hover .track, .bar.dragging .track { height: 6px; }
 .buf { position: absolute; top: 0; bottom: 0; background: rgba(255,255,255,.35); }
 .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; }
 .knob { position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #fff; transform: scale(0);
   transition: transform .4s var(--spring-bouncy); box-shadow: 0 1px 6px rgba(0,0,0,.4); }
-.bar:active .knob { transform: scale(1.25); }
-.buf { transition: width .4s var(--ease-out); }
 .bar:hover .knob { transform: scale(1); }
+.bar:active .knob, .bar.dragging .knob { transform: scale(1.25); }
+.buf { transition: width .4s var(--ease-out); }
 .tip { position: absolute; bottom: 26px; transform: translateX(-50%); display: grid; justify-items: center; gap: 4px; pointer-events: none; }
 .thumb { border: 2px solid rgba(255,255,255,.9); border-radius: 8px; background-color: #000; box-shadow: 0 8px 24px rgba(0,0,0,.6); }
 .tip-enter-active { transition: opacity .2s var(--ease-out), transform .4s var(--spring-bouncy); }

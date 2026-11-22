@@ -895,6 +895,30 @@ try {
   ok(!(await st()).paused, '移动端：再点中央按钮继续播放')
   await sleep(3800)
   ok((await st()).hidden, '移动端：播放中 3 秒后控制栏自动收起')
+  // 移动端拖动进度条超过 3 秒（含手指移出进度条并停留），控制栏和预览气泡不会中途隐藏，松开后跳转并在 3 秒后自动收起
+  await tapBlank()
+  await sleep(300)
+  const barBox = await (await mp.$('.bar')).boundingBox()
+  await mp.touchscreen.touchStart(barBox.x + barBox.width * 0.25, barBox.y + barBox.height / 2)
+  await sleep(1600)
+  await mp.touchscreen.touchMove(barBox.x + barBox.width * 0.5, barBox.y + barBox.height / 2 - 20)
+  await sleep(3500)
+  const dragSt = await mp.evaluate(() => ({
+    hidden: !!document.querySelector('.player.hide-ui'),
+    tip: !!document.querySelector('.tip'),
+    dragging: !!document.querySelector('.bar.dragging'),
+  }))
+  ok(!dragSt.hidden && dragSt.tip && dragSt.dragging, `移动端：拖动进度条超过 3 秒控制栏不隐藏（${JSON.stringify(dragSt)}）`)
+  await mp.touchscreen.touchEnd()
+  await sleep(500)
+  const afterDrag = await mp.evaluate(() => ({
+    hidden: !!document.querySelector('.player.hide-ui'),
+    tip: !!document.querySelector('.tip'),
+    ratio: document.querySelector('video').currentTime / document.querySelector('video').duration,
+  }))
+  ok(!afterDrag.hidden && !afterDrag.tip && afterDrag.ratio > 0.45 && afterDrag.ratio < 0.58, `移动端：松开进度条后完成跳转且控制栏仍显示（${JSON.stringify(afterDrag)}）`)
+  await sleep(3500)
+  ok((await st()).hidden, '移动端：松开进度条 3 秒后控制栏自动收起')
 
   // ---- 移动端卡片：没选中时点中间进详情页；点一下选中（iOS 会保持悬停状态、显示播放键）后再点播放键直接播放 ----
   {

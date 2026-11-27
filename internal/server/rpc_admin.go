@@ -89,10 +89,11 @@ func rpcUsersList(s *Server, c *call) (any, error) {
 
 func rpcUsersCreate(s *Server, c *call) (any, error) {
 	var p struct {
-		Username  string  `json:"username"`
-		Password  string  `json:"password"`
-		IsAdmin   bool    `json:"isAdmin"`
-		Libraries []int64 `json:"libraries"`
+		Username       string  `json:"username"`
+		Password       string  `json:"password"`
+		IsAdmin        bool    `json:"isAdmin"`
+		AllowTranscode *bool   `json:"allowTranscode"`
+		Libraries      []int64 `json:"libraries"`
 	}
 	if err := c.bind(&p); err != nil {
 		return nil, err
@@ -106,7 +107,11 @@ func rpcUsersCreate(s *Server, c *call) (any, error) {
 	if _, err := s.DB.UserByName(c.ctx, strings.TrimSpace(p.Username)); err == nil {
 		return nil, errf(api.CodeBadRequest, "用户名已存在")
 	}
-	id, err := s.DB.CreateUser(c.ctx, strings.TrimSpace(p.Username), auth.Hash(p.Password), p.IsAdmin)
+	allowTranscode := true
+	if p.AllowTranscode != nil {
+		allowTranscode = *p.AllowTranscode
+	}
+	id, err := s.DB.CreateUser(c.ctx, strings.TrimSpace(p.Username), auth.Hash(p.Password), p.IsAdmin, allowTranscode)
 	if err != nil {
 		return nil, err
 	}
@@ -133,12 +138,13 @@ func (s *Server) adminCount(c *call, exclude int64) (int, error) {
 
 func rpcUsersUpdate(s *Server, c *call) (any, error) {
 	var p struct {
-		ID        int64   `json:"id"`
-		IsAdmin   bool    `json:"isAdmin"`
-		Disabled  bool    `json:"disabled"`
-		Password  string  `json:"password"`
-		ClearPin  bool    `json:"clearPin"`
-		Libraries []int64 `json:"libraries"`
+		ID             int64   `json:"id"`
+		IsAdmin        bool    `json:"isAdmin"`
+		Disabled       bool    `json:"disabled"`
+		AllowTranscode *bool   `json:"allowTranscode"`
+		Password       string  `json:"password"`
+		ClearPin       bool    `json:"clearPin"`
+		Libraries      []int64 `json:"libraries"`
 	}
 	if err := c.bind(&p); err != nil {
 		return nil, err
@@ -156,7 +162,11 @@ func rpcUsersUpdate(s *Server, c *call) (any, error) {
 			return nil, errf(api.CodeBadRequest, "至少要保留一个可用的管理员")
 		}
 	}
-	if err := s.DB.UpdateUserFlags(c.ctx, p.ID, p.IsAdmin, p.Disabled); err != nil {
+	allowTranscode := u.AllowTranscode
+	if p.AllowTranscode != nil {
+		allowTranscode = *p.AllowTranscode
+	}
+	if err := s.DB.UpdateUserFlags(c.ctx, p.ID, p.IsAdmin, p.Disabled, allowTranscode); err != nil {
 		return nil, err
 	}
 	if p.Password != "" {
@@ -177,6 +187,9 @@ func rpcUsersUpdate(s *Server, c *call) (any, error) {
 	}
 	if p.Disabled || p.Password != "" {
 		s.sessions.logoutUser(p.ID, nil)
+	}
+	if (p.Disabled || !allowTranscode) && s.tc != nil {
+		s.tc.CloseUser(p.ID)
 	}
 	s.invalidateAccess()
 	return struct{}{}, nil
@@ -205,6 +218,9 @@ func rpcUsersDelete(s *Server, c *call) (any, error) {
 		return nil, err
 	}
 	s.sessions.logoutUser(p.ID, nil)
+	if s.tc != nil {
+		s.tc.CloseUser(p.ID)
+	}
 	s.invalidateAccess()
 	return struct{}{}, nil
 }

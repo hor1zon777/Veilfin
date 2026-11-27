@@ -524,7 +524,7 @@ func rpcPlayOpen(s *Server, c *call) (any, error) {
 		trick = map[string]any{"interval": tp.Interval, "cols": tp.Cols, "rows": tp.Rows, "width": tp.Width,
 			"height": tp.Height, "count": tp.Count, "sprites": sprites}
 	}
-	tc := s.transcodeInfo(c.ctx, row.Width, row.Height, row.Duration)
+	tc := s.transcodeInfo(c.ctx, c.u, row.Width, row.Height, row.Duration)
 	var next any
 	if p.Queue != nil {
 		// 播放队列（例如随机播放）：跳过已删除或无权访问的条目

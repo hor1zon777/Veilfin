@@ -7,6 +7,50 @@ import { RpcError } from './transport.js'
 
 const TOKEN_KEY = 'vf.token'
 const PIN_KEY = 'vf.serverKey'
+const CHUNK = 1 << 20
+const OVERHEAD = 28
+const CIPHER_CHUNK = CHUNK + OVERHEAD
+const MAX_STREAMS = 64
+
+function aadFor(id, idx, n) {
+  const idb = new TextEncoder().encode(id)
+  const aad = new Uint8Array(4 + idb.length + 9)
+  aad.set([0x56, 0x46, 0x4d, 0x32], 0) // "VFM2"
+  aad.set(idb, 4)
+  new DataView(aad.buffer).setBigUint64(4 + idb.length, BigInt(idx))
+  aad[aad.length - 1] = idx === n - 1 ? 1 : 0
+  return aad
+}
+
+function plainSizeOf(cs) {
+  if (cs === 0) return 0
+  const n = Math.ceil(cs / CIPHER_CHUNK)
+  const size = cs - n * OVERHEAD
+  return size > (n - 1) * CHUNK ? size : -1
+}
+
+async function decryptSegment(key, id, ct) {
+  const size = plainSizeOf(ct.length)
+  if (size < 0) throw new Error('分片长度不正确（数据被篡改或损坏）')
+  const n = Math.ceil(size / CHUNK)
+  const out = new Uint8Array(size)
+  for (let i = 0; i < n; i++) {
+    const len = Math.min(CHUNK, size - i * CHUNK)
+    const c = ct.subarray(i * CIPHER_CHUNK, i * CIPHER_CHUNK + len + OVERHEAD)
+    let pt
+    try {
+      pt = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: c.subarray(0, 12), additionalData: aadFor(id, i, n), tagLength: 128 },
+        key,
+        c.subarray(12),
+      )
+    } catch {
+      throw new Error('分片校验失败（数据被篡改或损坏）')
+    }
+    out.set(new Uint8Array(pt), i * CHUNK)
+  }
+  return out.buffer
+}
 
 export class WebTransport {
   mode = 'web'
@@ -22,6 +66,7 @@ export class WebTransport {
     this.authed = false
     this.blobTok = null
     this.registered = new Set()
+    this.streams = new Map()
     this.warning = ''
     this.seq = 0
   }
@@ -53,14 +98,31 @@ export class WebTransport {
         ev.ports[0]?.postMessage({ token: null })
       }
     })
-    await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+    await reg.update().catch(() => {})
+    const waitController = (ms, worker) =>
+      new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(t)
+          navigator.serviceWorker.removeEventListener('controllerchange', done)
+          worker?.removeEventListener('statechange', onState)
+          resolve()
+        }
+        const onState = () => {
+          if (worker.state === 'redundant') done()
+        }
+        const t = setTimeout(done, ms)
+        navigator.serviceWorker.addEventListener('controllerchange', done, { once: true })
+        worker?.addEventListener('statechange', onState)
+      })
+    // 若有新版 SW 正在安装或等待激活（服务端升级后），等它接管页面，避免停留在旧版 SW
+    const pending = reg.installing || reg.waiting
+    if (pending) await waitController(4000, pending)
     await navigator.serviceWorker.ready
     if (!navigator.serviceWorker.controller) {
-      // 第一次安装：等待 Service Worker 接管当前页面
-      await new Promise((resolve) => {
-        navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
-        setTimeout(resolve, 4000)
-      })
+      // 第一次安装或已有激活 SW 但尚未接管当前页面：请求接管并等待
+      reg.active?.postMessage({ type: 'claim' })
+      await waitController(4000)
     }
   }
 
@@ -152,6 +214,7 @@ export class WebTransport {
     if (m === 'auth.logout' || m === 'auth.lock' || m === 'auth.setPin' || m === 'auth.changePassword') {
       // 锁定 / 退出：丢弃所有对象密钥，并让 Service Worker 清空已解密的数据块
       this.registered.clear()
+      this.streams.clear()
       idb.clear('blobs')
       navigator.serviceWorker.controller?.postMessage({ type: 'clear-cache' })
     }
@@ -211,17 +274,201 @@ export class WebTransport {
       for (const [id] of entries) this.registered.add(id)
     }
     if (streams.length) {
-      // 转码流登记在同一个表里，键名加 t: 前缀（Service Worker 用它解密 /t/ 下的分片）
+      // 转码流同时保存在内存和 IndexedDB：hls.js 在页面内直接读播放列表并解密分片（不依赖 Service Worker，
+      // 避免旧版 SW 缓存或 SW 未接管导致 manifestLoadError）；IndexedDB 保留给原生 HLS 兜底。
       const entries = await Promise.all(
         streams.map(async (r) => [
-          't:' + r.$s,
+          r.$s,
           { key: await crypto.subtle.importKey('raw', b64decode(r.k), 'AES-GCM', false, ['decrypt']), playlist: r.p },
         ]),
       )
-      await idb.putMany('blobs', entries)
+      for (const [sid, info] of entries) {
+        this.streams.delete(sid)
+        this.streams.set(sid, info)
+        while (this.streams.size > MAX_STREAMS) this.streams.delete(this.streams.keys().next().value)
+      }
+      await idb.putMany(
+        'blobs',
+        entries.map(([sid, info]) => ['t:' + sid, info]),
+      )
     }
     if ((refs.length || streams.length) && !this.blobTok) await this.blobToken().catch(() => {})
     return data
+  }
+
+  async streamInfo(sid) {
+    let info = this.streams.get(sid)
+    if (!info) {
+      info = await idb.get('blobs', 't:' + sid).catch(() => null)
+      if (info) {
+        this.streams.set(sid, info)
+        while (this.streams.size > MAX_STREAMS) this.streams.delete(this.streams.keys().next().value)
+      }
+    }
+    return info || null
+  }
+
+  async loadStream(rawUrl, signal) {
+    const u = new URL(rawUrl, location.href)
+    const m = /^\/t\/([^/]+)\/([^/]+)$/.exec(u.pathname)
+    if (!m) return { ok: false, code: 404, text: '转码地址无效', url: u.href }
+    const sid = decodeURIComponent(m[1])
+    const name = m[2]
+    const info = await this.streamInfo(sid)
+    if (!info) return { ok: false, code: 404, text: '未知转码会话，请刷新页面', url: u.href }
+    if (name === 'index.m3u8') {
+      return { ok: true, code: 200, data: info.playlist, url: u.href }
+    }
+    if (!/^(init|0|[1-9][0-9]*)$/.test(name)) {
+      return { ok: false, code: 404, text: '分片名非法', url: u.href }
+    }
+    let res = null
+    let force = false
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      const token = await this.blobToken(force)
+      if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
+      const r = await fetch(this.apiBase + '/s/' + encodeURIComponent(sid) + '/' + name, {
+        headers: { 'X-VF-T': token },
+        cache: 'no-store',
+        signal,
+      })
+      if (r.status === 403) {
+        r.body?.cancel().catch(() => {})
+        force = true // 令牌失效或解锁状态变化，刷新后重试
+        continue
+      }
+      res = r
+    }
+    if (!res) return { ok: false, code: 403, text: '无权访问', url: u.href }
+    if (!res.ok) return { ok: false, code: res.status, text: '上游返回 HTTP ' + res.status, url: u.href }
+    const ct = new Uint8Array(await res.arrayBuffer())
+    const data = await decryptSegment(info.key, sid + '/' + name, ct)
+    return { ok: true, code: 200, data, url: u.href }
+  }
+
+  // hlsLoader 返回供 hls.js 使用的加载器：在页面内直接提供播放列表并拉取 / 解密分片，不经过 Service Worker。
+  hlsLoader(FallbackLoader) {
+    const tr = this
+    return class StreamLoader {
+      constructor(hlsConfig) {
+        this.hlsConfig = hlsConfig
+        this.stats = {
+          aborted: false,
+          loaded: 0,
+          retry: 0,
+          total: 0,
+          chunkCount: 0,
+          bwEstimate: 0,
+          loading: { start: 0, first: 0, end: 0 },
+          parsing: { start: 0, end: 0 },
+          buffering: { start: 0, first: 0, end: 0 },
+        }
+        this.context = null
+        this.config = null
+        this.callbacks = null
+        this.ctrl = null
+        this.reqTimer = null
+        this.retryTimer = null
+        this.fallback = null
+      }
+      load(context, config, callbacks) {
+        const u = new URL(context.url, location.href)
+        if (!u.pathname.startsWith('/t/') && FallbackLoader) {
+          this.fallback = new FallbackLoader(this.hlsConfig)
+          this.stats = this.fallback.stats
+          this.fallback.load(context, config, callbacks)
+          return
+        }
+        this.context = context
+        this.config = config
+        this.callbacks = callbacks
+        this.stats.loading.start = performance.now()
+        this.run()
+      }
+      run() {
+        if (!this.config || !this.context || !this.callbacks) return
+        const stats = this.stats
+        stats.loading.first = 0
+        stats.loaded = 0
+        stats.aborted = false
+        const ctrl = (this.ctrl = new AbortController())
+        const policy = this.config.loadPolicy || {}
+        const timeoutMs = policy.maxTimeToFirstByteMs || policy.maxLoadTimeMs || this.config.timeout || 60000
+        clearTimeout(this.reqTimer)
+        this.reqTimer = setTimeout(() => this.onTimeout(), timeoutMs)
+        tr.loadStream(this.context.url, ctrl.signal)
+          .then((r) => {
+            if (this.ctrl !== ctrl || stats.aborted || !this.callbacks) return
+            clearTimeout(this.reqTimer)
+            if (r.ok) {
+              const now = Math.max(performance.now(), stats.loading.start)
+              stats.loading.first = now
+              stats.loading.end = now
+              const len = typeof r.data === 'string' ? r.data.length : r.data.byteLength
+              stats.loaded = stats.total = len
+              stats.bwEstimate = (len * 8000) / Math.max(now - stats.loading.start, 1)
+              const cb = this.callbacks
+              cb.onProgress?.(stats, this.context, r.data, null)
+              cb.onSuccess({ url: r.url, data: r.data, code: r.code }, stats, this.context, null)
+              return
+            }
+            if (this.tryRetry(policy.errorRetry, r.code)) return
+            this.callbacks.onError({ code: r.code, text: r.text }, this.context, null, stats)
+          })
+          .catch((e) => {
+            if (this.ctrl !== ctrl || stats.aborted || e?.name === 'AbortError' || !this.callbacks) return
+            clearTimeout(this.reqTimer)
+            if (this.tryRetry(policy.errorRetry, 0)) return
+            this.callbacks.onError({ code: 0, text: e?.message || String(e) }, this.context, null, stats)
+          })
+      }
+      onTimeout() {
+        if (!this.callbacks || this.stats?.aborted) return
+        const policy = this.config?.loadPolicy || {}
+        if (this.tryRetry(policy.timeoutRetry, 0)) return
+        this.abortInternal()
+        this.callbacks.onTimeout(this.stats, this.context, null)
+      }
+      tryRetry(retryCfg, code) {
+        if (!retryCfg || this.stats.retry >= (retryCfg.maxNumRetry || 0)) return false
+        if (code && code >= 400 && code < 500 && code !== 408 && code !== 429) return false
+        const delay = Math.min((retryCfg.retryDelayMs || 1000) * Math.pow(2, this.stats.retry), retryCfg.maxRetryDelayMs || 8000)
+        this.stats.retry++
+        this.abortInternal()
+        this.retryTimer = setTimeout(() => this.run(), delay)
+        return true
+      }
+      abortInternal() {
+        clearTimeout(this.reqTimer)
+        clearTimeout(this.retryTimer)
+        if (this.ctrl) {
+          const c = this.ctrl
+          this.ctrl = null
+          c.abort()
+        }
+      }
+      abort() {
+        if (this.fallback) return this.fallback.abort()
+        if (this.stats) this.stats.aborted = true
+        this.abortInternal()
+        this.callbacks?.onAbort?.(this.stats, this.context, null)
+      }
+      destroy() {
+        if (this.fallback) {
+          this.fallback.destroy()
+          this.fallback = null
+        }
+        this.callbacks = this.context = this.config = null
+        this.abortInternal()
+        this.stats = null
+      }
+      getCacheAge() {
+        return this.fallback ? this.fallback.getCacheAge() : null
+      }
+      getResponseHeader(name) {
+        return this.fallback ? this.fallback.getResponseHeader(name) : null
+      }
+    }
   }
 
   async status() {

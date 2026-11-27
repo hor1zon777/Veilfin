@@ -107,7 +107,7 @@ async function save() {
         </p>
         <template v-if="encoders.length">
           <label class="check"><input v-model="s.transcodeEnabled" type="checkbox" /> 允许播放时选择较低画质（服务端实时转码）</label>
-          <p class="hint sub">网络慢、或浏览器不支持原始编码（例如 HEVC）时可以转成 1080P / 720P / 480P / 360P 的 H.264 播放。转码很占 CPU，原画播放不受影响。</p>
+          <p class="hint sub">网络慢、或浏览器不支持原始编码（例如 HEVC）时可以转成 1080P / 720P / 480P / 360P 的 H.264 播放。转码很占 CPU，原画播放不受影响；也可以在「用户」页按用户单独开关。</p>
           <div class="field">
             <label>编码器</label>
             <select v-model="s.transcodeEncoder" class="input short">

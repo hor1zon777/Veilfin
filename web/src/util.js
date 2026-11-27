@@ -113,6 +113,11 @@ export function randomSeed() {
   return crypto.getRandomValues(new Uint32Array(1))[0]
 }
 
+// 是否为微信 / 企业微信内置浏览器（不支持 Service Worker 解密或劫持视频播放）
+export function isWeChat(ua = navigator.userAgent) {
+  return /MicroMessenger/i.test(ua || '')
+}
+
 // 复制文本到剪贴板。通过局域网 IP（非 HTTPS）访问时没有 Clipboard API，退回到 execCommand。
 export async function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -127,6 +132,7 @@ export async function copyText(text) {
   ta.className = 'offscreen'
   document.body.appendChild(ta)
   ta.select()
+  ta.setSelectionRange?.(0, text.length)
   let ok = false
   try {
     ok = document.execCommand('copy')

@@ -5,6 +5,7 @@ import { state } from './store.js'
 import { transitionName, onPageLeft } from './router.js'
 import TopBar from './components/TopBar.vue'
 import PinDialog from './components/PinDialog.vue'
+import WeChatGuide from './components/WeChatGuide.vue'
 
 const route = useRoute()
 const showBar = computed(() => state.me && !route.meta.fullscreen && !route.meta.public)
@@ -25,7 +26,8 @@ watch(
 </script>
 
 <template>
-  <div v-if="state.fatal" class="fatal">
+  <WeChatGuide v-if="state.wechat" />
+  <div v-else-if="state.fatal" class="fatal">
     <h2>无法启动</h2>
     <p>{{ state.fatal }}</p>
     <button class="btn primary" @click="reload">重试</button>
@@ -43,10 +45,10 @@ watch(
       </Transition>
     </router-view>
     <PinDialog v-if="state.pin" />
-    <TransitionGroup tag="div" name="toast" class="toasts">
-      <div v-for="t in state.toasts" :key="t.id" class="toast" :class="t.kind">{{ t.msg }}</div>
-    </TransitionGroup>
   </template>
+  <TransitionGroup tag="div" name="toast" class="toasts">
+    <div v-for="t in state.toasts" :key="t.id" class="toast" :class="t.kind">{{ t.msg }}</div>
+  </TransitionGroup>
 </template>
 
 <style scoped>

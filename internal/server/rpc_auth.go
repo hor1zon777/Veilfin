@@ -39,6 +39,9 @@ func init() {
 		if err := s.DB.BumpTokenGen(c.ctx, c.u.ID); err != nil {
 			return nil, err
 		}
+		if s.tc != nil {
+			s.tc.CloseUser(c.u.ID)
+		}
 		s.invalidateAccess()
 		return s.me(c), nil
 	})
@@ -61,6 +64,7 @@ type meResult struct {
 	ID             int64  `json:"id"`
 	Username       string `json:"username"`
 	IsAdmin        bool   `json:"isAdmin"`
+	AllowTranscode bool   `json:"allowTranscode"`
 	HasPin         bool   `json:"hasPin"`
 	Unlocked       bool   `json:"unlocked"`
 	UnlockedUntil  int64  `json:"unlockedUntil"`
@@ -74,7 +78,7 @@ func (s *Server) me(c *call) *meResult {
 	until := c.ss.unlockedUntil
 	c.ss.mu.Unlock()
 	unlocked := c.u.PinHash == "" || s.now().Before(until)
-	r := &meResult{ID: c.u.ID, Username: c.u.Username, IsAdmin: c.u.IsAdmin, HasPin: c.u.PinHash != "",
+	r := &meResult{ID: c.u.ID, Username: c.u.Username, IsAdmin: c.u.IsAdmin, AllowTranscode: c.u.AllowTranscode, HasPin: c.u.PinHash != "",
 		Unlocked: unlocked, BlurRestricted: c.u.BlurRestricted}
 	st := s.Lib.Settings(c.ctx)
 	r.ServerName, r.KeepPageTitle = st.ServerName, st.KeepPageTitle
@@ -131,7 +135,7 @@ func rpcSetup(s *Server, c *call) (any, error) {
 	if err := auth.ValidatePassword(p.Password); err != nil {
 		return nil, errf(api.CodeBadRequest, "%v", err)
 	}
-	uid, err := s.DB.CreateUser(c.ctx, strings.TrimSpace(p.Username), auth.Hash(p.Password), true)
+	uid, err := s.DB.CreateUser(c.ctx, strings.TrimSpace(p.Username), auth.Hash(p.Password), true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -274,6 +278,9 @@ func rpcLogout(s *Server, c *call) (any, error) {
 	c.bind(&p)
 	if p.Token != "" {
 		s.DB.DeleteLoginToken(c.ctx, hashToken(p.Token))
+	}
+	if c.u != nil && s.tc != nil {
+		s.tc.CloseUser(c.u.ID)
 	}
 	c.ss.setUser(0)
 	return struct{}{}, nil

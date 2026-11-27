@@ -14,7 +14,7 @@ func TestReserveAttempt(t *testing.T) {
 	}
 	defer d.Close()
 	ctx := context.Background()
-	id, err := d.CreateUser(ctx, "u", "x", false)
+	id, err := d.CreateUser(ctx, "u", "x", false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,5 +96,45 @@ func TestReserveAttempt(t *testing.T) {
 	}
 	if u := user(); u.PinLockedUntil != 5900 || u.FailedLogins != 0 {
 		t.Fatalf("PIN 锁定不应影响登录计数: %+v", u)
+	}
+}
+
+// v5 迁移：按用户控制转码权限，旧版本已有用户升级后默认允许，且可按用户切换。
+func TestMigrateUserAllowTranscode(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := d.CreateUser(ctx, "u1", "x", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, err := d.UserByID(ctx, id); err != nil || u.AllowTranscode {
+		t.Fatalf("新建禁止转码用户异常: %v %+v", err, u)
+	}
+	// 退回到 v4 结构模拟升级
+	for _, q := range []string{"ALTER TABLE users DROP COLUMN allow_transcode", "PRAGMA user_version = 4"} {
+		if _, err := d.W.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	u, err := d.UserByID(ctx, id)
+	if err != nil || !u.AllowTranscode {
+		t.Fatalf("v5 迁移后已有用户应默认允许转码: %v %+v", err, u)
+	}
+	if err := d.UpdateUserFlags(ctx, id, false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := d.UserByID(ctx, id); u.AllowTranscode {
+		t.Fatal("关闭用户的转码权限没有保存")
 	}
 }

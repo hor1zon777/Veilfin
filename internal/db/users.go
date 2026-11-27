@@ -12,6 +12,7 @@ type User struct {
 	PwHash         string `json:"-"`
 	IsAdmin        bool   `json:"isAdmin"`
 	Disabled       bool   `json:"disabled"`
+	AllowTranscode bool   `json:"allowTranscode"`
 	PinHash        string `json:"-"`
 	BlurRestricted bool   `json:"blurRestricted"`
 	FailedLogins   int    `json:"-"`
@@ -23,11 +24,11 @@ type User struct {
 	TokenGen       uint32 `json:"-"`
 }
 
-const userCols = "id,username,pw_hash,is_admin,disabled,pin_hash,blur_restricted,failed_logins,locked_until,created_at,last_login_at,pin_fails,pin_locked_until,token_gen"
+const userCols = "id,username,pw_hash,is_admin,disabled,allow_transcode,pin_hash,blur_restricted,failed_logins,locked_until,created_at,last_login_at,pin_fails,pin_locked_until,token_gen"
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PwHash, &u.IsAdmin, &u.Disabled, &u.PinHash, &u.BlurRestricted,
+	err := row.Scan(&u.ID, &u.Username, &u.PwHash, &u.IsAdmin, &u.Disabled, &u.AllowTranscode, &u.PinHash, &u.BlurRestricted,
 		&u.FailedLogins, &u.LockedUntil, &u.CreatedAt, &u.LastLoginAt, &u.PinFails, &u.PinLockedUntil, &u.TokenGen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -41,9 +42,9 @@ func (d *DB) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (d *DB) CreateUser(ctx context.Context, username, pwHash string, isAdmin bool) (int64, error) {
-	res, err := d.W.ExecContext(ctx, "INSERT INTO users(username,pw_hash,is_admin,created_at) VALUES(?,?,?,?)",
-		username, pwHash, isAdmin, now())
+func (d *DB) CreateUser(ctx context.Context, username, pwHash string, isAdmin, allowTranscode bool) (int64, error) {
+	res, err := d.W.ExecContext(ctx, "INSERT INTO users(username,pw_hash,is_admin,allow_transcode,created_at) VALUES(?,?,?,?,?)",
+		username, pwHash, isAdmin, allowTranscode, now())
 	if err != nil {
 		return 0, err
 	}
@@ -75,8 +76,9 @@ func (d *DB) ListUsers(ctx context.Context) ([]*User, error) {
 	return out, rows.Err()
 }
 
-func (d *DB) UpdateUserFlags(ctx context.Context, id int64, isAdmin, disabled bool) error {
-	_, err := d.W.ExecContext(ctx, "UPDATE users SET is_admin=?, disabled=?, token_gen=token_gen+1 WHERE id=?", isAdmin, disabled, id)
+func (d *DB) UpdateUserFlags(ctx context.Context, id int64, isAdmin, disabled, allowTranscode bool) error {
+	_, err := d.W.ExecContext(ctx, "UPDATE users SET is_admin=?, disabled=?, allow_transcode=?, token_gen=token_gen+1 WHERE id=?",
+		isAdmin, disabled, allowTranscode, id)
 	return err
 }
 

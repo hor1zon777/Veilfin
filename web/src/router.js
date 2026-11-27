@@ -73,6 +73,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
+  if (state.wechat) return true // 保留原始链接，方便用户跳转浏览器或复制链接后直达原页面
   if (state.needsSetup && to.path !== '/setup') return '/setup'
   // 初始化完成后，管理员仍可以打开设置向导（从“服务器设置”这一步开始），刷新页面也不会中断向导
   if (!state.needsSetup && to.path === '/setup' && !state.me?.isAdmin) return state.me ? '/' : '/login'

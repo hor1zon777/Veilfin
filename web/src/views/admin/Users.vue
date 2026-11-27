@@ -20,10 +20,29 @@ async function load() {
 onMounted(load)
 
 function openNew() {
-  edit.value = { id: 0, username: '', password: '', isAdmin: false, disabled: false, clearPin: false, libraries: libs.value.filter((l) => !l.restricted).map((l) => l.id) }
+  edit.value = {
+    id: 0,
+    username: '',
+    password: '',
+    isAdmin: false,
+    disabled: false,
+    allowTranscode: true,
+    clearPin: false,
+    libraries: libs.value.filter((l) => !l.restricted).map((l) => l.id),
+  }
 }
 function openEdit(u) {
-  edit.value = { id: u.id, username: u.username, password: '', isAdmin: u.isAdmin, disabled: u.disabled, clearPin: false, hasPin: u.hasPin, libraries: [...u.libraries] }
+  edit.value = {
+    id: u.id,
+    username: u.username,
+    password: '',
+    isAdmin: u.isAdmin,
+    disabled: u.disabled,
+    allowTranscode: u.allowTranscode !== false,
+    clearPin: false,
+    hasPin: u.hasPin,
+    libraries: [...u.libraries],
+  }
 }
 
 async function save() {
@@ -31,9 +50,24 @@ async function save() {
   busy.value = true
   try {
     if (u.id) {
-      await rpc('admin.users.update', { id: u.id, isAdmin: u.isAdmin, disabled: u.disabled, password: u.password, clearPin: u.clearPin, libraries: u.libraries })
+      await rpc('admin.users.update', {
+        id: u.id,
+        isAdmin: u.isAdmin,
+        disabled: u.disabled,
+        allowTranscode: u.allowTranscode,
+        password: u.password,
+        clearPin: u.clearPin,
+        libraries: u.libraries,
+      })
+      if (u.id === state.me.id) state.me.allowTranscode = u.allowTranscode
     } else {
-      await rpc('admin.users.create', { username: u.username, password: u.password, isAdmin: u.isAdmin, libraries: u.libraries })
+      await rpc('admin.users.create', {
+        username: u.username,
+        password: u.password,
+        isAdmin: u.isAdmin,
+        allowTranscode: u.allowTranscode,
+        libraries: u.libraries,
+      })
     }
     toast('已保存', 'ok')
     edit.value = null
@@ -67,7 +101,7 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
     </div>
     <div class="card-panel users">
       <table class="list">
-        <thead><tr><th>用户名</th><th>角色</th><th>可访问的媒体库</th><th>PIN</th><th>最近登录</th><th></th></tr></thead>
+        <thead><tr><th>用户名</th><th>角色</th><th>可访问的媒体库</th><th>转码</th><th>PIN</th><th>最近登录</th><th></th></tr></thead>
         <tbody>
           <tr v-for="(u, i) in users" :key="u.id" class="fade" :style="{ '--i': i }">
             <td class="name">{{ u.username }} <span v-if="u.id === state.me.id" class="muted">（你）</span></td>
@@ -76,6 +110,7 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
               <span v-else class="tag" :class="{ admin: u.isAdmin }">{{ u.isAdmin ? '管理员' : '普通用户' }}</span>
             </td>
             <td class="libs" data-label="媒体库">{{ u.isAdmin ? '全部' : u.libraries.map(libName).join('、') || '无' }}</td>
+            <td class="tc" data-label="转码"><span :class="{ muted: !u.allowTranscode }">{{ u.allowTranscode ? '允许' : '关闭' }}</span></td>
             <td class="pin" data-label="PIN">{{ u.hasPin ? '已设置' : '—' }}</td>
             <td class="login muted" data-label="最近登录">{{ u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '从未' }}</td>
             <td class="ops">
@@ -96,6 +131,7 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
         </div>
         <div class="field">
           <label class="check"><input v-model="edit.isAdmin" type="checkbox" /> 管理员</label>
+          <label class="check"><input v-model="edit.allowTranscode" type="checkbox" /> 允许转码播放（服务端解码转码，关闭后仅原画）</label>
           <label v-if="edit.id" class="check"><input v-model="edit.disabled" type="checkbox" /> 禁用账号</label>
           <label v-if="edit.hasPin" class="check"><input v-model="edit.clearPin" type="checkbox" /> 清除该用户的 PIN</label>
         </div>
@@ -133,6 +169,7 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
 /* 移动端：表格改为一人一张卡片
    用户名        角色
    媒体库：……
+   转码：……
    PIN：……       编辑 删除
    最近登录：…… */
 @media (max-width: 600px) {
@@ -142,16 +179,17 @@ const libName = (id) => libs.value.find((l) => l.id === id)?.name || '#' + id
   .card-panel.users { padding: 2px 14px; }
   table.list, table.list tbody { display: block; }
   table.list thead { display: none; }
-  table.list tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name role' 'libs libs' 'pin ops' 'login ops';
+  table.list tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'name role' 'libs libs' 'tc ops' 'pin ops' 'login ops';
     gap: 4px 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
   table.list tr:last-child { border-bottom: 0; }
   table.list td, table.list tr:hover td { padding: 0; border: 0; background: none; min-width: 0; }
   .name { grid-area: name; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
   .role { grid-area: role; align-self: center; justify-self: end; }
   .libs { grid-area: libs; max-width: none; margin-top: 2px; }
+  .tc { grid-area: tc; }
   .pin { grid-area: pin; }
   .login { grid-area: login; }
-  .libs, .pin, .login { font-size: 13px; overflow-wrap: anywhere; }
+  .libs, .tc, .pin, .login { font-size: 13px; overflow-wrap: anywhere; }
   td[data-label]::before { content: attr(data-label) '：'; color: var(--muted); }
   .ops { grid-area: ops; align-self: end; display: flex; gap: 4px; }
   .ops .btn { height: 32px; padding: 0 12px; background: var(--panel2); }

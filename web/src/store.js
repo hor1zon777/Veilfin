@@ -1,12 +1,14 @@
 // 全局状态与通用操作。
 import { reactive } from 'vue'
 import { LocalTransport, RpcError } from './api/transport.js'
+import { isWeChat } from './util.js'
 
 export { RpcError }
 
 export const state = reactive({
   ready: false,
   fatal: '',
+  wechat: false, // 微信内置浏览器中打开网页模式：提示跳转系统浏览器
   mode: '',
   me: null, // 当前用户
   serverName: 'Veilfin',
@@ -21,12 +23,18 @@ let transport = null
 export async function init() {
   const cfg = await (await fetch('/config.json', { cache: 'no-store' })).json()
   if (cfg.mode === 'web') {
+    state.mode = 'web'
+    if (isWeChat()) {
+      state.wechat = true
+      state.ready = true
+      return
+    }
     const { WebTransport } = await import('./api/web-transport.js')
     transport = new WebTransport(cfg)
   } else {
     transport = new LocalTransport()
+    state.mode = transport.mode
   }
-  state.mode = transport.mode
   await transport.init()
   const info = await transport.call('sys.info')
   state.needsSetup = info.needsSetup
@@ -63,6 +71,10 @@ export function beacon(m, p) {
 
 export function connectionStatus() {
   return transport.status()
+}
+
+export function hlsLoader(Base) {
+  return transport?.hlsLoader?.(Base)
 }
 
 export function toast(msg, kind = 'info') {

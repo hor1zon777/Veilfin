@@ -63,7 +63,7 @@ docker compose logs veilfin     # 记下“服务端公钥”和“公钥指纹�
 
 查找 ffmpeg 的顺序是：`-ffmpeg` 参数 → 系统里已安装的（PATH）→ 内置版本。只有系统里找不到时，内置的 ffmpeg 才会解压到数据目录的 `bin/` 下使用（数据目录所在分区不能禁止执行程序）。
 
-**播放时转码**需要 ffmpeg 带 H.264 编码器：libx264（CPU），NVIDIA NVENC / Intel Quick Sync / AMD AMF / Apple VideoToolbox 硬件编码，或者 OpenH264。内置的精简 ffmpeg 为了保持 LGPL 不用 x264，带的是 OpenH264（Cisco，BSD 许可），开箱即可转码，但同样码率下画质不如 libx264；想要更好的画质，可以安装系统自带的完整 ffmpeg（例如 `apt install ffmpeg`，系统里的 ffmpeg 优先使用），或者用 `-ffmpeg` 指定。服务端启动后会逐个试编码，确认哪些编码器真的可用（硬件编码器编进了 ffmpeg，但没有显卡或驱动时不可用），自动选择时 OpenH264 排在最后。管理后台的“服务器设置 → 播放时转码”里可以开关这个功能、选择编码器、限制同时转码的播放数（默认 2 路）。
+**播放时转码**需要 ffmpeg 带 H.264 编码器：libx264（CPU），NVIDIA NVENC / Intel Quick Sync / AMD AMF / Apple VideoToolbox 硬件编码，或者 OpenH264。内置的精简 ffmpeg 为了保持 LGPL 不用 x264，带的是 OpenH264（Cisco，BSD 许可），开箱即可转码，但同样码率下画质不如 libx264；想要更好的画质，可以安装系统自带的完整 ffmpeg（例如 `apt install ffmpeg`，系统里的 ffmpeg 优先使用），或者用 `-ffmpeg` 指定。服务端启动后会逐个试编码，确认哪些编码器真的可用（硬件编码器编进了 ffmpeg，但没有显卡或驱动时不可用），自动选择时 OpenH264 排在最后。管理后台的“服务器设置 → 播放时转码”里可以全局开关这个功能、选择编码器、限制同时转码的播放数（默认 2 路），也可以在“管理后台 → 用户”里按用户单独开关转码权限（关闭后该用户只能原画播放）。
 
 转码的工作方式：ffmpeg 从播放位置开始把视频转成分片 MP4，服务端按 4 秒一段切成 HLS 分片，每段单独加密后下发（不缓存），浏览器用 hls.js 播放（iOS 17.1 以上用 ManagedMediaSource）。分片的时间戳就是源视频里的时间，所以进度、字幕、预览图和续播都不受影响。拖动到还没转码的位置时，服务端从新位置重新开始转码；转出的内容领先播放位置约 2 分钟后暂停 ffmpeg；暂停播放 1 分钟后结束 ffmpeg，20 分钟后删除临时文件（在数据目录的 `transcode/` 下）。
 
@@ -96,6 +96,7 @@ veilfin client -server https://你的CDN域名 -server-key '服务端公钥'
 
 - 必须是 HTTPS。Service Worker 和 WebCrypto 只能在安全上下文中使用
 - Firefox 的隐私模式用不了，因为它禁用了 Service Worker
+- 微信内置浏览器无法解密播放，在微信中打开网页模式链接会自动提示并引导跳转系统浏览器（保留当前页面地址，支持一键复制链接）
 
 **强隔离部署**：前端页面走一个不经过 CDN 的子域名（DNS 直接指向源站），API 和视频走 CDN。这样 CDN 就没有机会篡改前端代码：
 

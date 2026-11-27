@@ -298,6 +298,8 @@ async function dumpPlayer(page) {
       for (let i = 0; v && i < v.buffered.length; i++) buf.push([v.buffered.start(i).toFixed(1), v.buffered.end(i).toFixed(1)])
       return {
         t: v?.currentTime, rs: v?.readyState, paused: v?.paused, seeking: v?.seeking, h: v?.videoHeight, src: v?.src,
+        qBtn: !!document.querySelector('.q-btn'), qLabel: document.querySelector('.q-label')?.textContent?.trim(),
+        flash: document.querySelector('.flash')?.textContent?.trim(),
         buf, err: document.querySelector('.center-msg.err')?.textContent?.trim(), url: location.href,
       }
     })
@@ -545,6 +547,141 @@ try {
   await playbackTest(page, webBase, 'web')
   await featureTest(page, webBase, 'web')
   await transcodeTest(page, webBase, 'web')
+
+  // ---- 回归：网页模式转码不依赖 Service Worker（即使 SW 未接管 / 为旧版，也不会触发 manifestLoadError） ----
+  {
+    const swCache = await page.evaluate(async () => (await fetch('/sw.js', { cache: 'no-store' })).headers.get('cache-control'))
+    ok(swCache === 'no-store', `网页模式：/sw.js 禁止缓存（Cache-Control: ${swCache}）`)
+    const ctxNoSw = await browser.createBrowserContext()
+    const np = await newPage(ctxNoSw, 'web-nosw')
+    await np.goto(webBase + '/#/login', { waitUntil: 'networkidle2' })
+    await np.waitForSelector('#u', { timeout: 20000 })
+    await np.type('#u', 'admin')
+    await np.type('#p', 'admin-password-1')
+    await np.click('button[type=submit]')
+    await np.waitForSelector('.topbar', { timeout: 20000 })
+    // 拦截任何落到 /t/ 的请求并返回 404，模拟旧版 SW 不拦截 /t/ 或页面未被 SW 接管的场景
+    await np.setRequestInterception(true)
+    let hitT = 0
+    let hitS = 0
+    np.on('request', (req) => {
+      const p = new URL(req.url()).pathname
+      if (p.startsWith('/t/')) {
+        hitT++
+        req.respond({ status: 404, body: 'not found' })
+        return
+      }
+      if (p.startsWith('/s/')) hitS++
+      req.continue()
+    })
+    await np.evaluate(() => localStorage.setItem('vf.quality', '480p'))
+    await np.goto(webBase + '/#/library/1?view=', { waitUntil: 'networkidle2' })
+    await np.waitForSelector('.grid .card')
+    const href = await np.$$eval('.grid .card', (cs) => cs.map((c) => [c.querySelector('.title').textContent, c.getAttribute('href')]))
+    const partyId = href.find(([t]) => t.includes('家庭聚会'))[1].split('/').pop()
+    await np.goto(webBase + `/#/play/${partyId}?t=20`, { waitUntil: 'networkidle2' })
+    const playedNoSw = await np
+      .waitForFunction(() => {
+        const v = document.querySelector('video')
+        return v && v.videoHeight === 480 && v.currentTime > 21 && !v.paused && v.readyState >= 3
+      }, { timeout: 40000 })
+      .then(() => true)
+      .catch(() => false)
+    if (!ok(playedNoSw && hitT === 0 && hitS > 0, `网页模式：hls.js 页面内直接加载播放列表与分片，不依赖 Service Worker（/t/=${hitT}，/s/=${hitS}）`)) await dumpPlayer(np)
+    ok(np.errors.filter((e) => !e.includes('favicon')).length === 0, '网页模式（无 SW 转码）：没有控制台错误')
+    await np.goto(webBase + '/#/', { waitUntil: 'networkidle2' })
+    await sleep(300)
+    await ctxNoSw.close()
+  }
+
+  // ---- 用户级转码开关：管理后台可按用户关闭 / 开启转码权限 ----
+  {
+    await page.goto(webBase + '/#/admin/users', { waitUntil: 'networkidle2' })
+    await page.waitForSelector('.head .btn.primary')
+    await page.click('.head .btn.primary')
+    await page.waitForSelector('.dialog input.input')
+    const [uIn, pIn] = await page.$$('.dialog input.input')
+    await uIn.type('viewer-notc')
+    await pIn.type('viewer-password-1')
+    // 取消勾选“允许转码播放”
+    await page.evaluate(() => {
+      const cb = [...document.querySelectorAll('.dialog label.check')].find((l) => l.textContent.includes('允许转码播放'))?.querySelector('input')
+      if (cb?.checked) cb.click()
+    })
+    await page.click('.dialog footer .btn.primary')
+    await page.waitForFunction(() => !document.querySelector('.dialog') && [...document.querySelectorAll('table.list tbody tr')].some((r) => r.textContent.includes('viewer-notc')), { timeout: 10000 })
+    const rowText = await page.evaluate(() => [...document.querySelectorAll('table.list tbody tr')].find((r) => r.textContent.includes('viewer-notc'))?.querySelector('td.tc')?.textContent.trim())
+    ok(rowText === '关闭', `管理后台：新建关闭转码的用户后列表显示“关闭”（${rowText}）`)
+
+    const ctxViewer = await browser.createBrowserContext()
+    const vp = await newPage(ctxViewer, 'viewer-notc')
+    await vp.goto(webBase + '/#/login', { waitUntil: 'networkidle2' })
+    await vp.waitForSelector('#u', { timeout: 20000 })
+    await vp.type('#u', 'viewer-notc')
+    await vp.type('#p', 'viewer-password-1')
+    await vp.click('button[type=submit]')
+    await vp.waitForSelector('.topbar', { timeout: 20000 })
+    await vp.evaluate(() => localStorage.setItem('vf.quality', '480p'))
+    await vp.goto(webBase + '/#/library/1?view=', { waitUntil: 'networkidle2' })
+    await vp.waitForSelector('.grid .card')
+    const vHref = await vp.$$eval('.grid .card', (cs) => cs.map((c) => [c.querySelector('.title').textContent, c.getAttribute('href')]))
+    const vPartyId = vHref.find(([t]) => t.includes('家庭聚会'))[1].split('/').pop()
+    await vp.goto(webBase + `/#/play/${vPartyId}?t=5`, { waitUntil: 'networkidle2' })
+    const origOnly = await vp
+      .waitForFunction(() => {
+        const v = document.querySelector('video')
+        return v && v.videoHeight === 720 && v.currentTime > 6 && !v.paused && v.src.includes('/b/')
+      }, { timeout: 30000 })
+      .then(() => true)
+      .catch(() => false)
+    const hasQBtn = await vp.$('.q-btn').then((e) => !!e)
+    ok(origOnly && !hasQBtn, '用户级转码开关关闭：播放页仅播原画且不显示画质切换按钮')
+
+    // 管理员重新开启该用户的转码权限
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('table.list tbody tr')].find((r) => r.textContent.includes('viewer-notc'))
+      tr?.querySelector('.ops .btn')?.click()
+    })
+    await page.waitForSelector('.dialog')
+    await page.evaluate(() => {
+      const cb = [...document.querySelectorAll('.dialog label.check')].find((l) => l.textContent.includes('允许转码播放'))?.querySelector('input')
+      if (cb && !cb.checked) cb.click()
+    })
+    await page.click('.dialog footer .btn.primary')
+    await page.waitForFunction(
+      () =>
+        !document.querySelector('.dialog') &&
+        [...document.querySelectorAll('table.list tbody tr')]
+          .find((r) => r.textContent.includes('viewer-notc'))
+          ?.querySelector('td.tc')
+          ?.textContent.trim() === '允许',
+      { timeout: 10000 },
+    )
+    const rowText2 = await page.evaluate(() => [...document.querySelectorAll('table.list tbody tr')].find((r) => r.textContent.includes('viewer-notc'))?.querySelector('td.tc')?.textContent.trim())
+    ok(rowText2 === '允许', `管理后台：重新开启转码后列表显示“允许”（${rowText2}）`)
+    await vp.reload({ waitUntil: 'networkidle2' })
+    const reEnabled = await vp
+      .waitForFunction(() => {
+        const v = document.querySelector('video')
+        return v && v.videoHeight === 480 && v.currentTime > 6 && !v.paused && !!document.querySelector('.q-btn')
+      }, { timeout: 40000 })
+      .then(() => true)
+      .catch(() => false)
+    if (!ok(reEnabled, '用户级转码开关重新开启：用户恢复画质切换与转码播放')) await dumpPlayer(vp)
+    ok(vp.errors.filter((e) => !e.includes('favicon')).length === 0, '用户级转码开关测试：没有控制台错误')
+    await vp.goto(webBase + '/#/', { waitUntil: 'networkidle2' })
+    await sleep(300)
+    await ctxViewer.close()
+
+    // 删除临时测试用户
+    await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('table.list tbody tr')].find((r) => r.textContent.includes('viewer-notc'))
+      tr?.querySelector('.ops .btn.err')?.click()
+    })
+    await page.waitForSelector('.dialog .btn.danger')
+    await page.click('.dialog .btn.danger')
+    await page.waitForFunction(() => !document.querySelector('.dialog'), { timeout: 10000 })
+  }
 
   // ---- 卡片中间的播放键：直接播放，不经过详情页；点卡片其他位置进详情页 ----
   await page.goto(webBase + '/#/library/1', { waitUntil: 'networkidle2' })
@@ -970,9 +1107,10 @@ try {
         cards: rows.every((r) => getComputedStyle(r).display === 'grid'),
         fits: rows.every((r) => [...r.querySelectorAll('td, .btn')].every(inView)),
         labels: getComputedStyle(rows[0].querySelector('td.libs'), '::before').content,
+        tcLabel: getComputedStyle(rows[0].querySelector('td.tc'), '::before').content,
       }
     })
-    ok(ul.rows >= 2 && ul.noHScroll && ul.headHidden && ul.cards && ul.fits && ul.labels.includes('媒体库'), `移动端：用户页显示为卡片、内容不超出屏幕（${JSON.stringify(ul)}）`)
+    ok(ul.rows >= 2 && ul.noHScroll && ul.headHidden && ul.cards && ul.fits && ul.labels.includes('媒体库') && ul.tcLabel.includes('转码'), `移动端：用户页显示为卡片、内容不超出屏幕（${JSON.stringify(ul)}）`)
     await shot(mp, 'web-mobile-admin-users')
   }
   // ---- 移动端：类型页改为一行一个类型，名称不会被挤成一列；其他页面内容都不超出屏幕 ----
@@ -1017,6 +1155,58 @@ try {
   }
   ok(mp.errors.length === 0, '移动端：没有控制台错误' + (mp.errors.length ? '\n      ' + mp.errors.join('\n      ') : ''))
   await mp.close()
+
+  // ---- 微信内置浏览器打开网页模式链接：提示跳转系统浏览器，不注册 SW、保留原页面链接、可一键复制 ----
+  {
+    const ctxWx = await browser.createBrowserContext()
+    await ctxWx.overridePermissions(webBase, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'])
+    const wx = await newPage(ctxWx, 'wechat')
+    await wx.emulate(KnownDevices['iPhone 13'])
+    await wx.setUserAgent(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800322c) NetType/WIFI Language/zh_CN',
+    )
+    const targetUrl = webBase + '/#/item/1'
+    await wx.goto(targetUrl, { waitUntil: 'networkidle2' })
+    await wx.waitForSelector('.wx-guide', { timeout: 15000 })
+    await sleep(600)
+    const iosInfo = await wx.evaluate(async () => ({
+      title: document.querySelector('.wx-box h2')?.textContent?.trim(),
+      text: document.querySelector('.wx-box')?.textContent || '',
+      arrow: !!document.querySelector('.wx-arrow'),
+      hash: location.hash,
+      link: document.querySelector('.wx-box .copy-field code')?.textContent?.trim(),
+      noSw: (await navigator.serviceWorker.getRegistrations()).length === 0,
+      noPin: !localStorage.getItem('vf.serverKey'),
+      noHScroll: document.documentElement.scrollWidth <= innerWidth,
+    }))
+    ok(
+      iosInfo.title === '请在浏览器中打开' &&
+        iosInfo.arrow &&
+        iosInfo.text.includes('Safari') &&
+        iosInfo.hash === '#/item/1' &&
+        iosInfo.link === targetUrl &&
+        iosInfo.noSw &&
+        iosInfo.noPin &&
+        iosInfo.noHScroll,
+      `微信（iOS）：显示浏览器跳转引导、保留原始链接且不注册 SW（${JSON.stringify({ title: iosInfo.title, arrow: iosInfo.arrow, hash: iosInfo.hash, noSw: iosInfo.noSw, noHScroll: iosInfo.noHScroll })}）`,
+    )
+    await shot(wx, 'web-wechat-guide')
+    await wx.click('.wx-box .btn.primary')
+    await sleep(300)
+    const wxClip = await wx.evaluate(() => navigator.clipboard.readText()).catch((e) => 'ERR ' + e.message)
+    ok(wxClip === targetUrl, '微信：点击“复制当前链接”后完整链接进入剪贴板')
+
+    // Android 微信：显示“在浏览器打开”
+    await wx.setUserAgent(
+      'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.6261.120 Mobile Safari/537.36 MicroMessenger/8.0.50.2701 NetType/WIFI Language/zh_CN',
+    )
+    await wx.reload({ waitUntil: 'networkidle2' })
+    await wx.waitForSelector('.wx-guide', { timeout: 15000 })
+    const andText = await wx.$eval('.wx-box', (e) => e.textContent)
+    ok(andText.includes('在浏览器打开') && !andText.includes('Safari'), '微信（Android）：显示安卓版跳转引导文案')
+    ok(wx.errors.filter((e) => !e.includes('favicon')).length === 0, '微信引导页：没有控制台错误 / CSP 违规')
+    await ctxWx.close()
+  }
 
   // ================= 本地客户端模式 =================
   console.log('\n[本地客户端模式] 浏览器 → 127.0.0.1 → Go 客户端加密 → 服务端')

@@ -28,14 +28,15 @@ func Handler(configJSON func(r *http.Request) []byte) http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Write(configJSON(r))
 			return
+		case p == "/sw.js":
+			// 禁止浏览器和 CDN 缓存 Service Worker，避免升级后停留在旧版
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Service-Worker-Allowed", "/")
 		case strings.HasPrefix(p, "/assets/"):
 			// 文件名带内容哈希，可以长期缓存
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		default:
 			w.Header().Set("Cache-Control", "no-cache")
-		}
-		if p == "/sw.js" {
-			w.Header().Set("Service-Worker-Allowed", "/")
 		}
 		files.ServeHTTP(w, r)
 	})

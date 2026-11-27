@@ -17,6 +17,7 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8096',
       '/b': 'http://127.0.0.1:8096',
+      '/t': 'http://127.0.0.1:8096',
       '/config.json': 'http://127.0.0.1:8096',
     },
   },

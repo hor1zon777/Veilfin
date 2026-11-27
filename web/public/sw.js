@@ -27,6 +27,8 @@ self.addEventListener('message', (e) => {
     cache.clear()
     tokenMemo = null
     for (const job of new Set(pending.values())) job.cancel()
+  } else if (e.data?.type === 'claim') {
+    e.waitUntil?.(self.clients.claim().catch(() => {}))
   }
 })
 
@@ -50,19 +52,37 @@ function openDB() {
         if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs')
         if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta')
       }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
+      req.onsuccess = () => {
+        const db = req.result
+        db.onclose = () => (dbp = null)
+        db.onversionchange = () => {
+          db.close()
+          dbp = null
+        }
+        resolve(db)
+      }
+      req.onerror = () => {
+        dbp = null
+        reject(req.error)
+      }
     })
   }
   return dbp
 }
 async function idbGet(store, key) {
-  const db = await openDB()
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(store).objectStore(store).get(key)
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const db = await openDB()
+    try {
+      return await new Promise((resolve, reject) => {
+        const req = db.transaction(store).objectStore(store).get(key)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      })
+    } catch (e) {
+      dbp = null
+      if (attempt === 1) throw e
+    }
+  }
 }
 
 // ---- 解密块缓存（LRU） ----
@@ -400,9 +420,14 @@ function parseRange(h, size) {
 }
 
 async function serve(req, id) {
-  const info = await idbGet('blobs', id)
-  if (!info) return new Response('未知对象，请刷新页面', { status: 404 })
-  const cfg = (await idbGet('meta', 'cfg')) || {}
+  let info, cfg
+  try {
+    info = await idbGet('blobs', id)
+    if (!info) return new Response('未知对象，请刷新页面', { status: 404 })
+    cfg = (await idbGet('meta', 'cfg')) || {}
+  } catch (e) {
+    return new Response(String(e?.message || e), { status: 502 })
+  }
   const base = cfg.apiBase || ''
   const size = info.size
   const range = parseRange(req.headers.get('Range'), size)
@@ -476,16 +501,16 @@ async function serveStream(req, path) {
   if (!m) return new Response(null, { status: 404 })
   const sid = decodeURIComponent(m[1])
   const name = m[2]
-  const info = await idbGet('blobs', 't:' + sid)
-  if (!info) return new Response('未知转码会话，请刷新页面', { status: 404 })
   const noStore = { 'Cache-Control': 'no-store' }
-  if (name === 'index.m3u8') {
-    return new Response(info.playlist, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', ...noStore } })
-  }
-  if (!/^(init|0|[1-9][0-9]*)$/.test(name)) return new Response(null, { status: 404 })
-  const cfg = (await idbGet('meta', 'cfg')) || {}
-  const base = cfg.apiBase || ''
   try {
+    const info = await idbGet('blobs', 't:' + sid)
+    if (!info) return new Response('未知转码会话，请刷新页面', { status: 404, headers: noStore })
+    if (name === 'index.m3u8') {
+      return new Response(info.playlist, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', ...noStore } })
+    }
+    if (!/^(init|0|[1-9][0-9]*)$/.test(name)) return new Response(null, { status: 404, headers: noStore })
+    const cfg = (await idbGet('meta', 'cfg')) || {}
+    const base = cfg.apiBase || ''
     let res = null
     let force = false
     for (let attempt = 0; attempt < 2 && !res; attempt++) {

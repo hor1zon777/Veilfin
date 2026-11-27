@@ -14,11 +14,34 @@ export function openDB() {
         if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs')
         if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta')
       }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
+      req.onsuccess = () => {
+        const db = req.result
+        db.onclose = () => (dbp = null)
+        db.onversionchange = () => {
+          db.close()
+          dbp = null
+        }
+        resolve(db)
+      }
+      req.onerror = () => {
+        dbp = null
+        reject(req.error)
+      }
     })
   }
   return dbp
+}
+
+async function withDB(fn) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const db = await openDB()
+    try {
+      return await fn(db)
+    } catch (e) {
+      dbp = null
+      if (attempt === 1) throw e
+    }
+  }
 }
 
 function done(tx) {
@@ -29,30 +52,34 @@ function done(tx) {
   })
 }
 
-export async function putMany(store, entries) {
-  const db = await openDB()
-  const tx = db.transaction(store, 'readwrite')
-  const s = tx.objectStore(store)
-  for (const [k, v] of entries) s.put(v, k)
-  return done(tx)
-}
-
-export async function put(store, key, value) {
-  return putMany(store, [[key, value]])
-}
-
-export async function get(store, key) {
-  const db = await openDB()
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(store).objectStore(store).get(key)
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+export function putMany(store, entries) {
+  return withDB((db) => {
+    const tx = db.transaction(store, 'readwrite')
+    const s = tx.objectStore(store)
+    for (const [k, v] of entries) s.put(v, k)
+    return done(tx)
   })
 }
 
-export async function clear(store) {
-  const db = await openDB()
-  const tx = db.transaction(store, 'readwrite')
-  tx.objectStore(store).clear()
-  return done(tx)
+export function put(store, key, value) {
+  return putMany(store, [[key, value]])
+}
+
+export function get(store, key) {
+  return withDB(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const req = db.transaction(store).objectStore(store).get(key)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      }),
+  )
+}
+
+export function clear(store) {
+  return withDB((db) => {
+    const tx = db.transaction(store, 'readwrite')
+    tx.objectStore(store).clear()
+    return done(tx)
+  })
 }

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { state, rpc, beacon, toastError } from '../store.js'
+import { state, rpc, beacon, toastError, hlsLoader } from '../store.js'
 import { fmtTime, randomId } from '../util.js'
 import { queueAt } from '../queue.js'
 import Icon from '../components/Icon.vue'
@@ -171,7 +171,9 @@ async function setSource(q, t, play) {
     // ManagedMediaSource（iOS）要求关闭隔空播放，或者另外提供可投放的地址
     v.disableRemotePlayback = true
     const retry = { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 8000 }
+    const loader = hlsLoader(Hls.DefaultConfig.loader)
     hls = new Hls({
+      ...(loader ? { loader } : {}),
       startPosition: t,
       enableWorker: false, // 严格 CSP 不允许 blob: Worker
       maxBufferLength: 40,
@@ -201,10 +203,13 @@ function onHlsError(_, d) {
   if (d.type === Hls.ErrorTypes.NETWORK_ERROR && !hlsRetried && v) {
     // 转码会话可能因为暂停太久被服务端清理了：重新建一个，从当前位置继续（只重试一次）
     hlsRetried = true
-    setSource(quality.value, v.currentTime || cur.value, !v.paused).catch((e) => (err.value = '转码播放失败：' + e.message))
+    setSource(quality.value, v.currentTime || pendingSeek || cur.value, playAfterLoad || !v.paused).catch(
+      (e) => (err.value = '转码播放失败：' + e.message),
+    )
     return
   }
-  err.value = '转码播放失败（' + (d.details || d.type) + '），可以切换回原画播放'
+  const code = d.response?.code ? ` HTTP ${d.response.code}` : ''
+  err.value = '转码播放失败（' + (d.details || d.type) + code + '），可以切换回原画播放'
 }
 
 async function setQuality(q) {

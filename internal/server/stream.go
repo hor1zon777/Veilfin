@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"veilfin/internal/api"
+	"veilfin/internal/db"
 	"veilfin/internal/media"
 	"veilfin/internal/mediacrypt"
 	"veilfin/internal/transcode"
@@ -64,6 +65,9 @@ func rpcPlayTranscode(s *Server, c *call) (any, error) {
 	if err := c.bind(&p); err != nil {
 		return nil, err
 	}
+	if !c.u.AllowTranscode {
+		return nil, errf(api.CodeForbidden, "当前账号未开启转码权限")
+	}
 	enc := s.transcodeEncoder(c.ctx)
 	if enc == "" {
 		return nil, errf(api.CodeBadRequest, "服务端没有开启转码，或 ffmpeg 不带可用的 H.264 编码器")
@@ -116,9 +120,9 @@ func rpcPlayTranscodeStop(s *Server, c *call) (any, error) {
 	return nil, nil
 }
 
-// transcodeInfo 是 play.open 返回给前端的转码选项；不能转码时为 nil。
-func (s *Server) transcodeInfo(ctx context.Context, w, h int, dur float64) any {
-	if dur <= 0 || s.transcodeEncoder(ctx) == "" {
+// transcodeInfo 是 play.open 返回给前端的转码选项；不能转码或用户未开启转码权限时为 nil。
+func (s *Server) transcodeInfo(ctx context.Context, u *db.User, w, h int, dur float64) any {
+	if u == nil || !u.AllowTranscode || dur <= 0 || s.transcodeEncoder(ctx) == "" {
 		return nil
 	}
 	profiles := transcode.ProfilesFor(w, h)
@@ -128,20 +132,20 @@ func (s *Server) transcodeInfo(ctx context.Context, w, h int, dur float64) any {
 	return map[string]any{"profiles": profiles}
 }
 
-// authorizeObject 校验访问令牌：用户有效、能访问该媒体库、受限内容已解锁。返回用户 ID。
-func (s *Server) authorizeObject(r *http.Request, libraryID int64) (int64, bool) {
+// authorizeObject 校验访问令牌：用户有效、能访问该媒体库、受限内容已解锁。返回用户。
+func (s *Server) authorizeObject(r *http.Request, libraryID int64) (*db.User, bool) {
 	uid, gen, flags, ok := s.keys.ParseToken(r.Header.Get(api.TokenHeader), s.now())
 	if !ok {
-		return 0, false
+		return nil, false
 	}
 	a, err := s.access(r.Context(), uid)
 	if err != nil || a.user.Disabled || gen != a.user.TokenGen || !a.allowed[libraryID] {
-		return 0, false
+		return nil, false
 	}
 	if a.restricted[libraryID] && a.user.PinHash != "" && flags&mediacrypt.TokenUnlocked == 0 {
-		return 0, false
+		return nil, false
 	}
-	return uid, true
+	return a.user, true
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +158,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		blobError(w, http.StatusNotFound)
 		return
 	}
-	if uid, ok := s.authorizeObject(r, sess.LibraryID); !ok || uid != sess.UID {
+	if u, ok := s.authorizeObject(r, sess.LibraryID); !ok || u.ID != sess.UID || !u.AllowTranscode {
 		blobError(w, http.StatusForbidden)
 		return
 	}

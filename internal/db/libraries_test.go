@@ -34,7 +34,7 @@ func TestMigrateLibraryTrickplay(t *testing.T) {
 				}
 			}
 			// 退回到 v3 的表结构，模拟从旧版本升级
-			for _, q := range []string{"ALTER TABLE libraries DROP COLUMN trickplay", "PRAGMA user_version = 3"} {
+			for _, q := range []string{"ALTER TABLE users DROP COLUMN allow_transcode", "ALTER TABLE libraries DROP COLUMN trickplay", "PRAGMA user_version = 3"} {
 				if _, err := d.W.Exec(q); err != nil {
 					t.Fatal(err)
 				}

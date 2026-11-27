@@ -260,6 +260,10 @@ ALTER TABLE libraries ADD COLUMN trickplay INTEGER NOT NULL DEFAULT 1;
 UPDATE libraries SET trickplay = 0
   WHERE (SELECT json_extract(value, '$.trickplayEnabled') FROM settings WHERE key = 'config') = 0;
 `,
+	// v5：按用户控制是否允许播放时转码，已有用户默认允许
+	`
+ALTER TABLE users ADD COLUMN allow_transcode INTEGER NOT NULL DEFAULT 1;
+`,
 }
 
 func (d *DB) migrate() error {

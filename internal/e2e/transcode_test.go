@@ -186,7 +186,52 @@ func TestTranscode(t *testing.T) {
 		t.Fatalf("新会话获取分片失败: HTTP %d", code)
 	}
 
-	// 关闭转码后不再提供画质选项
+	// 按用户控制转码权限：关闭后不能转码且进行中的会话立即结束，开启后恢复
+	var uRes struct {
+		ID int64 `json:"id"`
+	}
+	admin.must("admin.users.create", map[string]any{
+		"username": "no-tc", "password": "no-tc-password", "allowTranscode": false, "libraries": []int64{lib.ID},
+	}, &uRes)
+	bob := e.newClient()
+	var me struct {
+		AllowTranscode bool `json:"allowTranscode"`
+	}
+	bob.must("auth.login", map[string]any{"username": "no-tc", "password": "no-tc-password"}, &me)
+	if me.AllowTranscode {
+		t.Fatal("新建禁止转码的用户 allowTranscode 应为 false")
+	}
+	bob.must("play.open", map[string]any{"id": item.ID}, &open)
+	if open.Transcode != nil {
+		t.Fatal("未开启转码权限的用户不应看到画质选项")
+	}
+	bob.expectCode("play.transcode", map[string]any{"id": item.ID, "quality": "360p"}, "forbidden")
+	// 给该用户开启转码权限：可以正常转码播放
+	admin.must("admin.users.update", map[string]any{
+		"id": uRes.ID, "allowTranscode": true, "libraries": []int64{lib.ID},
+	}, nil)
+	bob.must("play.open", map[string]any{"id": item.ID}, &open)
+	if open.Transcode == nil || len(open.Transcode.Profiles) != 1 {
+		t.Fatalf("开启转码权限后应返回画质选项: %+v", open.Transcode)
+	}
+	var bobTC struct {
+		Stream string `json:"stream"`
+	}
+	bob.must("play.transcode", map[string]any{"id": item.ID, "quality": "360p", "psid": "bob1"}, &bobTC)
+	bobBase := strings.TrimSuffix(bobTC.Stream, "index.m3u8")
+	if code, _, _ := bob.get(bobBase+"0", ""); code != 200 {
+		t.Fatalf("开启权限后获取转码分片失败: HTTP %d", code)
+	}
+	// 再次关闭该用户的转码权限：已创建的会话立即失效，后续请求被拒绝
+	admin.must("admin.users.update", map[string]any{
+		"id": uRes.ID, "allowTranscode": false, "libraries": []int64{lib.ID},
+	}, nil)
+	if code, _, _ := bob.get(bobBase+"1", ""); code != 403 && code != 404 {
+		t.Fatalf("关闭转码权限后旧会话不应继续提供分片: HTTP %d", code)
+	}
+	bob.expectCode("play.transcode", map[string]any{"id": item.ID, "quality": "360p"}, "forbidden")
+
+	// 关闭全局转码后不再提供画质选项
 	var st map[string]any
 	var got struct {
 		Settings map[string]any `json:"settings"`
